@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Christmas Gift Hunt</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg-day: linear-gradient(135deg, #87ceeb 0%, #e0f7fa 50%, #b3e5fc 100%);
+      --bg-dawn: linear-gradient(135deg, #ffb74d 0%, #ff8a65 50%, #ffcc80 100%);
+      --bg-dusk: linear-gradient(135deg, #7e57c2 0%, #ff7043 50%, #5c6bc0 100%);
+      --bg-night: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg-night);
+      min-height: 100vh;
+      overflow: hidden;
+      color: #fff;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    body.time-day { background: var(--bg-day); }
+    body.time-dawn { background: var(--bg-dawn); }
+    body.time-dusk { background: var(--bg-dusk); }
+    body.time-night { background: var(--bg-night); }
+
+    /* Loading Screen */
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-night);
+      z-index: 1000;
+    }
+    #loading.hidden { display: none; }
+    .loading-title { font-size: 2.5rem; margin-bottom: 1rem; animation: pulse 2s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+    .loading-spinner {
+      width: 50px; height: 50px;
+      border: 4px solid rgba(255,255,255,0.2);
+      border-top-color: #4ecdc4;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Join Screen */
+    #join-screen {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 900;
+      padding: 1rem;
+    }
+    #join-screen.hidden { display: none; }
+    .join-box {
+      background: rgba(0,0,0,0.6);
+      backdrop-filter: blur(10px);
+      border-radius: 20px;
+      padding: 1.5rem;
+      text-align: center;
+      border: 1px solid rgba(255,255,255,0.2);
+      width: 100%;
+      max-width: 350px;
+    }
+    .join-box h1 { font-size: 1.8rem; margin-bottom: 0.5rem; }
+    .join-box p { opacity: 0.8; margin-bottom: 1rem; font-size: 0.9rem; }
+    .join-box input {
+      width: 100%;
+      padding: 0.8rem;
+      border: none;
+      border-radius: 10px;
+      font-size: 1rem;
+      margin-bottom: 1rem;
+      background: rgba(255,255,255,0.9);
+      color: #333;
+    }
+    .color-picker { display: flex; gap: 0.4rem; justify-content: center; margin-bottom: 1rem; flex-wrap: wrap; }
+    .color-option {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 3px solid transparent;
+      transition: transform 0.2s;
+    }
+    .color-option:hover, .color-option.selected { transform: scale(1.15); border-color: #fff; }
+    .join-btn {
+      background: linear-gradient(135deg, #4ecdc4, #44a08d);
+      color: #fff;
+      border: none;
+      padding: 1rem 2rem;
+      font-size: 1.1rem;
+      border-radius: 10px;
+      cursor: pointer;
+      width: 100%;
+    }
+
+    /* Game Container */
+    #game-container { display: none; width: 100vw; height: 100vh; position: relative; }
+    #game-container.active { display: block; }
+    #game-canvas { position: absolute; top: 0; left: 0; }
+
+    /* HUD - Top Bar */
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      padding: 0.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      pointer-events: none;
+      z-index: 100;
+      gap: 0.5rem;
+    }
+    .hud-panel {
+      background: rgba(0,0,0,0.6);
+      backdrop-filter: blur(5px);
+      border-radius: 10px;
+      padding: 0.5rem 0.8rem;
+      pointer-events: auto;
+      font-size: 0.85rem;
+    }
+    .player-stats { display: flex; gap: 1rem; align-items: center; }
+    .stat { display: flex; flex-direction: column; align-items: center; }
+    .stat-value { font-size: 1.2rem; font-weight: bold; transition: transform 0.2s, color 0.2s; }
+    .stat-value.bump { transform: scale(1.3); color: #ffd700; }
+    .stat-label { font-size: 0.65rem; opacity: 0.7; }
+    .level-badge {
+      background: linear-gradient(135deg, #f97316, #eab308);
+      padding: 0.2rem 0.6rem;
+      border-radius: 15px;
+      font-weight: bold;
+      font-size: 0.75rem;
+    }
+
+    /* Active Powerups */
+    #active-powerups {
+      position: fixed;
+      top: 60px; left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 0.5rem;
+      z-index: 100;
+    }
+    .active-powerup {
+      background: rgba(0,0,0,0.7);
+      padding: 0.3rem 0.6rem;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+      animation: powerupPulse 1s infinite;
+    }
+    @keyframes powerupPulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+
+    /* Snowball Counter */
+    #snowball-counter {
+      position: fixed;
+      top: 60px; right: 0.5rem;
+      background: rgba(0,0,0,0.6);
+      padding: 0.4rem 0.8rem;
+      border-radius: 10px;
+      z-index: 100;
+      font-size: 0.9rem;
+    }
+
+    /* Weather Indicator */
+    #weather-indicator {
+      position: fixed;
+      top: 60px; left: 0.5rem;
+      background: rgba(0,0,0,0.6);
+      padding: 0.4rem 0.8rem;
+      border-radius: 10px;
+      z-index: 100;
+      font-size: 0.8rem;
+    }
+
+    /* Minimap */
+    #minimap {
+      position: fixed;
+      bottom: 0.5rem; right: 0.5rem;
+      width: 150px; height: 100px;
+      background: rgba(0,0,0,0.7);
+      border-radius: 10px;
+      border: 2px solid rgba(255,255,255,0.2);
+      overflow: hidden;
+      z-index: 100;
+    }
+    #minimap-canvas { width: 100%; height: 100%; }
+    @media (max-width: 600px) {
+      #minimap { width: 100px; height: 67px; }
+    }
+
+    /* Chat - Collapsible on mobile */
+    #chat-container {
+      position: fixed;
+      bottom: 0.5rem; left: 0.5rem;
+      width: 280px;
+      max-height: 250px;
+      z-index: 100;
+      transition: transform 0.3s;
+    }
+    #chat-container.collapsed { transform: translateX(-240px); }
+    #chat-toggle {
+      position: absolute;
+      right: -30px; top: 0;
+      width: 30px; height: 40px;
+      background: rgba(0,0,0,0.6);
+      border: none;
+      border-radius: 0 10px 10px 0;
+      color: #fff;
+      cursor: pointer;
+      display: none;
+    }
+    @media (max-width: 600px) {
+      #chat-toggle { display: block; }
+      #chat-container { width: 240px; }
+      #chat-container.collapsed { transform: translateX(-200px); }
+    }
+    #chat-messages {
+      background: rgba(0,0,0,0.6);
+      border-radius: 10px 10px 0 0;
+      padding: 0.4rem;
+      max-height: 150px;
+      overflow-y: auto;
+      font-size: 0.8rem;
+    }
+    .chat-message { padding: 0.2rem; border-radius: 5px; margin-bottom: 0.2rem; }
+    .chat-message.system { color: #ffd93d; font-style: italic; }
+    .chat-message .name { font-weight: bold; }
+    #chat-input-container { display: flex; gap: 0.3rem; }
+    #chat-input {
+      flex: 1;
+      padding: 0.5rem;
+      border: none;
+      border-radius: 0 0 0 10px;
+      background: rgba(255,255,255,0.9);
+      color: #333;
+      font-size: 0.85rem;
+    }
+    #chat-send {
+      padding: 0.5rem 0.8rem;
+      background: #4ecdc4;
+      border: none;
+      border-radius: 0 0 10px 0;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    /* Emotes Bar */
+    #emotes-bar {
+      position: fixed;
+      bottom: 120px; left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 0.3rem;
+      background: rgba(0,0,0,0.6);
+      padding: 0.4rem;
+      border-radius: 25px;
+      z-index: 100;
+    }
+    .emote-btn {
+      width: 36px; height: 36px;
+      background: rgba(255,255,255,0.1);
+      border: none;
+      border-radius: 50%;
+      font-size: 1.2rem;
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .emote-btn:hover, .emote-btn:active { transform: scale(1.2); background: rgba(255,255,255,0.2); }
+
+    /* Teams Panel - Collapsible */
+    #teams-panel {
+      position: fixed;
+      top: 100px; right: 0.5rem;
+      width: 160px;
+      background: rgba(0,0,0,0.6);
+      border-radius: 10px;
+      padding: 0.6rem;
+      z-index: 100;
+      transition: transform 0.3s;
+    }
+    #teams-panel.collapsed { transform: translateX(130px); }
+    #teams-toggle {
+      position: absolute;
+      left: -25px; top: 0;
+      width: 25px; height: 30px;
+      background: rgba(0,0,0,0.6);
+      border: none;
+      border-radius: 10px 0 0 10px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+    .team-item {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.4rem;
+      margin-bottom: 0.2rem;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+    .team-item:hover { background: rgba(255,255,255,0.1); }
+    .team-color { width: 16px; height: 16px; border-radius: 50%; }
+    .team-score { margin-left: auto; font-weight: bold; }
+    #create-team-btn {
+      width: 100%;
+      margin-top: 0.4rem;
+      padding: 0.4rem;
+      background: #4ecdc4;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 0.75rem;
+    }
+
+    /* Leaderboard - Collapsible */
+    #leaderboard {
+      position: fixed;
+      top: 100px; left: 0.5rem;
+      width: 160px;
+      background: rgba(0,0,0,0.6);
+      border-radius: 10px;
+      padding: 0.6rem;
+      z-index: 100;
+      max-height: 200px;
+      overflow-y: auto;
+      transition: transform 0.3s;
+    }
+    #leaderboard.collapsed { transform: translateX(-130px); }
+    #leaderboard-toggle {
+      position: absolute;
+      right: -25px; top: 0;
+      width: 25px; height: 30px;
+      background: rgba(0,0,0,0.6);
+      border: none;
+      border-radius: 0 10px 10px 0;
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+    .leaderboard-title { font-weight: bold; margin-bottom: 0.4rem; font-size: 0.85rem; }
+    .player-row {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.2rem;
+      border-radius: 5px;
+      font-size: 0.75rem;
+    }
+    .player-row.me { background: rgba(78, 205, 196, 0.3); }
+    .player-rank { font-weight: bold; width: 16px; }
+    .player-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .player-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .player-score { font-weight: bold; }
+
+    /* Virtual Joystick */
+    #joystick-zone {
+      position: fixed;
+      bottom: 20px; left: 20px;
+      width: 120px; height: 120px;
+      z-index: 200;
+      display: none;
+    }
+    @media (max-width: 768px) {
+      #joystick-zone { display: block; }
+    }
+    #joystick-base {
+      position: absolute;
+      width: 100px; height: 100px;
+      background: rgba(255,255,255,0.2);
+      border: 3px solid rgba(255,255,255,0.4);
+      border-radius: 50%;
+      left: 10px; top: 10px;
+    }
+    #joystick-stick {
+      position: absolute;
+      width: 50px; height: 50px;
+      background: rgba(255,255,255,0.5);
+      border-radius: 50%;
+      left: 35px; top: 35px;
+      transition: none;
+    }
+
+    /* Action Buttons (mobile) */
+    #action-buttons {
+      position: fixed;
+      bottom: 20px; right: 20px;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      z-index: 200;
+    }
+    @media (max-width: 768px) {
+      #action-buttons { display: flex; }
+    }
+    .action-btn {
+      width: 60px; height: 60px;
+      background: rgba(255,255,255,0.3);
+      border: 3px solid rgba(255,255,255,0.5);
+      border-radius: 50%;
+      font-size: 1.5rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .action-btn:active { background: rgba(255,255,255,0.5); }
+
+    /* Floating Emotes */
+    .floating-emote {
+      position: fixed;
+      font-size: 2rem;
+      pointer-events: none;
+      animation: floatUp 2s ease-out forwards;
+      z-index: 300;
+    }
+    @keyframes floatUp {
+      0% { opacity: 1; transform: translateY(0) scale(1); }
+      100% { opacity: 0; transform: translateY(-100px) scale(1.5); }
+    }
+
+    /* Status Effects */
+    .frozen-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(135, 206, 235, 0.3);
+      pointer-events: none;
+      z-index: 50;
+      animation: frozenPulse 0.5s infinite;
+    }
+    @keyframes frozenPulse {
+      0%, 100% { opacity: 0.3; }
+      50% { opacity: 0.5; }
+    }
+
+    /* Level Up Notification */
+    .level-up-notification {
+      position: fixed;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      background: linear-gradient(135deg, #f97316, #eab308);
+      padding: 1.5rem 2rem;
+      border-radius: 20px;
+      font-size: 1.5rem;
+      font-weight: bold;
+      text-align: center;
+      z-index: 1000;
+      animation: levelUp 2s ease-out forwards;
+    }
+    @keyframes levelUp {
+      0% { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+      20% { opacity: 1; transform: translate(-50%, -50%) scale(1.2); }
+      80% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+      100% { opacity: 0; transform: translate(-50%, -50%) scale(0.8); }
+    }
+    @keyframes flashOut {
+      0% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+
+    /* Blizzard effect */
+    .blizzard-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(255,255,255,0.1);
+      pointer-events: none;
+      z-index: 40;
+    }
+
+    /* Aurora effect */
+    .aurora-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 30%;
+      background: linear-gradient(180deg,
+        rgba(0, 255, 128, 0.2) 0%,
+        rgba(128, 0, 255, 0.15) 50%,
+        transparent 100%);
+      pointer-events: none;
+      z-index: 40;
+      animation: auroraWave 4s ease-in-out infinite;
+    }
+    @keyframes auroraWave {
+      0%, 100% { opacity: 0.5; }
+      50% { opacity: 1; }
+    }
+  </style>
+</head>
+<body class="time-night">
+  <!-- Loading Screen -->
+  <div id="loading">
+    <div class="loading-title">Christmas Hunt</div>
+    <div class="loading-spinner"></div>
+    <p style="margin-top: 1rem; opacity: 0.7; font-size: 0.9rem;">Connecting...</p>
+  </div>
+
+  <!-- Join Screen -->
+  <div id="join-screen" class="hidden">
+    <div class="join-box">
+      <h1>Christmas Hunt</h1>
+      <p>Hunt gifts, avoid Grinches, throw snowballs!</p>
+      <input type="text" id="player-name" placeholder="Your name..." maxlength="15">
+      <p style="font-size: 0.8rem; margin-bottom: 0.5rem;">Choose color:</p>
+      <div class="color-picker" id="color-picker">
+        <div class="color-option selected" style="background: #ff6b6b" data-color="#ff6b6b"></div>
+        <div class="color-option" style="background: #4ecdc4" data-color="#4ecdc4"></div>
+        <div class="color-option" style="background: #45b7d1" data-color="#45b7d1"></div>
+        <div class="color-option" style="background: #96ceb4" data-color="#96ceb4"></div>
+        <div class="color-option" style="background: #ffeaa7" data-color="#ffeaa7"></div>
+        <div class="color-option" style="background: #a29bfe" data-color="#a29bfe"></div>
+        <div class="color-option" style="background: #fd79a8" data-color="#fd79a8"></div>
+        <div class="color-option" style="background: #fff" data-color="#ffffff"></div>
+      </div>
+      <button class="join-btn" id="join-btn">Start Hunting!</button>
+    </div>
+  </div>
+
+  <!-- Game Container -->
+  <div id="game-container">
+    <canvas id="game-canvas"></canvas>
+
+    <!-- HUD Top -->
+    <div id="hud">
+      <div class="hud-panel player-stats">
+        <div class="stat">
+          <span class="stat-value" id="score-value">0</span>
+          <span class="stat-label">Score</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value" id="gifts-value">0</span>
+          <span class="stat-label">Gifts</span>
+        </div>
+        <span class="level-badge" id="level-badge">Beginner</span>
+      </div>
+      <div class="hud-panel" id="players-online">
+        <span id="players-count">0</span> Online
+      </div>
+    </div>
+
+    <!-- Weather -->
+    <div id="weather-indicator">Clear</div>
+
+    <!-- Snowballs -->
+    <div id="snowball-counter">Snowballs: <span id="snowball-count">5</span></div>
+
+    <!-- Active Powerups -->
+    <div id="active-powerups"></div>
+
+    <!-- Leaderboard -->
+    <div id="leaderboard">
+      <button id="leaderboard-toggle">&#9664;</button>
+      <div class="leaderboard-title">Leaderboard</div>
+      <div id="leaderboard-list"></div>
+    </div>
+
+    <!-- Teams -->
+    <div id="teams-panel">
+      <button id="teams-toggle">&#9654;</button>
+      <div style="font-weight: bold; margin-bottom: 0.4rem; font-size: 0.85rem;">Teams</div>
+      <div id="teams-list"></div>
+      <button id="create-team-btn">+ Create Team</button>
+    </div>
+
+    <!-- Minimap -->
+    <div id="minimap">
+      <canvas id="minimap-canvas"></canvas>
+    </div>
+
+    <!-- Chat -->
+    <div id="chat-container">
+      <button id="chat-toggle">&#9776;</button>
+      <div id="chat-messages"></div>
+      <div id="chat-input-container">
+        <input type="text" id="chat-input" placeholder="Chat..." maxlength="200">
+        <button id="chat-send">Send</button>
+      </div>
+    </div>
+
+    <!-- Emotes -->
+    <div id="emotes-bar"></div>
+
+    <!-- Virtual Joystick -->
+    <div id="joystick-zone">
+      <div id="joystick-base"></div>
+      <div id="joystick-stick"></div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div id="action-buttons">
+      <button class="action-btn" id="throw-btn">&#10052;</button>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>

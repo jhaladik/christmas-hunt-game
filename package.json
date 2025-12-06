@@ -1,0 +1,15 @@
+{
+  "name": "christmas-hunt-game",
+  "version": "1.0.0",
+  "description": "Multiplayer Christmas gift hunting game",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "echo 'No build step needed'"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "wrangler": "^3.91.0"
+  }
+}
