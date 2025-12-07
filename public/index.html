@@ -182,6 +182,104 @@
       font-size: 0.9rem;
     }
 
+    /* Round Timer */
+    #round-timer-panel {
+      position: fixed;
+      top: 0.5rem; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.8);
+      padding: 0.6rem 1.2rem;
+      border-radius: 10px;
+      z-index: 110;
+      text-align: center;
+    }
+    #round-timer {
+      font-size: 2rem;
+      font-weight: bold;
+      font-family: monospace;
+      color: #4ecdc4;
+    }
+    #round-timer-label {
+      font-size: 0.65rem;
+      opacity: 0.7;
+    }
+
+    /* Hits Display */
+    #hits-panel {
+      position: fixed;
+      top: 60px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.6);
+      padding: 0.4rem 0.8rem;
+      border-radius: 10px;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    #hits-label {
+      font-size: 0.75rem;
+      opacity: 0.8;
+    }
+    #hits-display {
+      display: flex;
+      gap: 0.3rem;
+    }
+    .hit-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #333;
+      border: 2px solid #666;
+    }
+    .hit-dot.hit {
+      background: #ff4444;
+      border-color: #ff6666;
+      box-shadow: 0 0 5px #ff4444;
+    }
+
+    /* Round End Overlay */
+    .round-end-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.85);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 2000;
+      animation: fadeIn 0.3s ease-out;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    .round-end-content {
+      text-align: center;
+      color: #fff;
+    }
+    .round-end-title {
+      font-size: 2.5rem;
+      font-weight: bold;
+      margin-bottom: 0.5rem;
+      text-shadow: 0 0 20px rgba(255,255,255,0.5);
+    }
+    .round-end-winner {
+      font-size: 2rem;
+      font-weight: bold;
+      margin-bottom: 0.5rem;
+    }
+    .round-end-detail {
+      font-size: 1.2rem;
+      opacity: 0.8;
+      margin-bottom: 1rem;
+    }
+    .round-end-next {
+      font-size: 1rem;
+      opacity: 0.6;
+      animation: pulse 1s infinite;
+    }
+
     /* Weather Indicator */
     #weather-indicator {
       position: fixed;
@@ -540,6 +638,32 @@
   <!-- Game Container -->
   <div id="game-container">
     <canvas id="game-canvas"></canvas>
+
+    <!-- Round Timer (Capture the Tree mode) -->
+    <div id="round-timer-panel" style="display: none;">
+      <div id="round-timer">3:00</div>
+      <div id="round-timer-label">ROUND TIME</div>
+    </div>
+
+    <!-- Hits Display (Capture the Tree mode) -->
+    <div id="hits-panel" style="display: none;">
+      <span id="hits-label">HITS:</span>
+      <div id="hits-display">
+        <div class="hit-dot"></div>
+        <div class="hit-dot"></div>
+        <div class="hit-dot"></div>
+      </div>
+    </div>
+
+    <!-- Round End Overlay -->
+    <div class="round-end-overlay" id="round-end-overlay">
+      <div class="round-end-content">
+        <div class="round-end-title" id="round-end-title">Round Over!</div>
+        <div class="round-end-winner" id="round-end-winner"></div>
+        <div class="round-end-detail" id="round-end-stats"></div>
+        <div class="round-end-next" id="round-end-message">Next round starting soon...</div>
+      </div>
+    </div>
 
     <!-- HUD Top -->
     <div id="hud">

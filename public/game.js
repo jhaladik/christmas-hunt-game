@@ -18,10 +18,15 @@ class ChristmasHuntGame {
     this.levels = [];
     this.powerupTypes = [];
     this.emotes = [];
-    this.gameMode = 'ffa';
+    this.gameMode = 'capture';
     this.weather = 'clear';
     this.timeOfDay = 'night';
     this.floatingEmotes = [];
+
+    // Capture the Tree mode state
+    this.roundActive = false;
+    this.roundEndTime = 0;
+    this.hitsToRespawn = 3;
 
     // Canvas
     this.canvas = document.getElementById('game-canvas');
@@ -42,6 +47,10 @@ class ChristmasHuntGame {
     // Mouse position for throwing
     this.mouseX = 0;
     this.mouseY = 0;
+
+    // Player facing direction (default: right)
+    this.facingDirX = 1;
+    this.facingDirY = 0;
 
     // Pending collection requests to avoid duplicates
     this.pendingGiftCollections = new Set();
@@ -316,6 +325,51 @@ class ChristmasHuntGame {
         this.teams.set(data.team.id, data.team);
         this.updateTeamsPanel();
         break;
+
+      // Capture the Tree mode events
+      case 'roundStart':
+        this.roundActive = true;
+        this.roundEndTime = data.roundEndTime;
+        this.showNotification('ROUND STARTED!', '#4ecdc4');
+        // Reset local player position from server
+        break;
+      case 'roundTimer':
+        this.roundEndTime = data.roundEndTime;
+        this.updateRoundTimer();
+        break;
+      case 'roundEnd':
+        this.roundActive = false;
+        this.showRoundEndScreen(data);
+        break;
+      case 'treeCapture':
+        this.showTreeCaptureEffect(data);
+        break;
+      case 'snowballHit':
+        // Handle hit effects
+        if (data.hitPlayerId === this.playerId) {
+          this.player.hits = data.hits;
+          this.updateHitsDisplay();
+          this.triggerScreenShake(6);
+          if (data.respawned) {
+            this.player.x = data.playerX;
+            this.player.y = data.playerY;
+            this.player.hits = 0;
+            this.showNotification('RESPAWNED!', '#ff6b6b');
+          } else {
+            this.showNotification(`HIT! ${data.hits}/${data.hitsToRespawn}`, '#87ceeb');
+          }
+        }
+        const hitPlayer = this.players.get(data.hitPlayerId);
+        if (hitPlayer) {
+          hitPlayer.hits = data.hits;
+          if (data.respawned) {
+            hitPlayer.x = data.playerX;
+            hitPlayer.y = data.playerY;
+          }
+          this.spawnParticles(hitPlayer.x, hitPlayer.y, '#87ceeb', 15, 4);
+        }
+        this.snowballs.delete(data.snowballId);
+        break;
     }
   }
 
@@ -328,6 +382,12 @@ class ChristmasHuntGame {
     this.emotes = data.emotes;
     this.weather = data.weather;
     this.timeOfDay = data.timeOfDay;
+    this.gameMode = data.gameMode;
+
+    // Capture the Tree state
+    this.roundActive = data.roundActive;
+    this.roundEndTime = data.roundEndTime;
+    this.hitsToRespawn = data.hitsToRespawn || 3;
 
     data.players.forEach(p => this.players.set(p.id, p));
     data.gifts.forEach(g => this.gifts.set(g.id, g));
@@ -349,6 +409,8 @@ class ChristmasHuntGame {
     this.updateUI();
     this.updateWeatherUI();
     this.updateTimeUI();
+    this.updateRoundTimer();
+    this.updateHitsDisplay();
     this.startGameLoop();
   }
 
@@ -539,6 +601,9 @@ class ChristmasHuntGame {
   update() {
     if (!this.player) return;
 
+    // Update round timer every frame for smooth countdown
+    this.updateRoundTimer();
+
     let dx = 0, dy = 0;
 
     // Keyboard
@@ -555,6 +620,10 @@ class ChristmasHuntGame {
       // Normalize
       const len = Math.sqrt(dx*dx + dy*dy);
       if (len > 1) { dx /= len; dy /= len; }
+
+      // Update facing direction
+      this.facingDirX = dx;
+      this.facingDirY = dy;
 
       this.ws.send(JSON.stringify({ type: 'move', dx, dy }));
 
@@ -619,10 +688,32 @@ class ChristmasHuntGame {
 
   throwSnowball() {
     if (!this.player || this.player.snowballs <= 0) return;
+
+    // Calculate target position - use facing direction to shoot forward
+    const throwDistance = 300;
+    let targetX, targetY;
+
+    // If mouse is significantly away from player, use mouse position
+    const playerScreenX = this.player.x - this.camera.x;
+    const playerScreenY = this.player.y - this.camera.y;
+    const mouseDx = (this.mouseX - this.camera.x) - playerScreenX;
+    const mouseDy = (this.mouseY - this.camera.y) - playerScreenY;
+    const mouseDistFromPlayer = Math.sqrt(mouseDx * mouseDx + mouseDy * mouseDy);
+
+    if (mouseDistFromPlayer > 50) {
+      // Mouse is far enough, shoot towards mouse
+      targetX = this.mouseX;
+      targetY = this.mouseY;
+    } else {
+      // Mouse is close to player, shoot in facing direction
+      targetX = this.player.x + this.facingDirX * throwDistance;
+      targetY = this.player.y + this.facingDirY * throwDistance;
+    }
+
     this.ws.send(JSON.stringify({
       type: 'throwSnowball',
-      targetX: this.mouseX,
-      targetY: this.mouseY
+      targetX,
+      targetY
     }));
   }
 
@@ -662,6 +753,11 @@ class ChristmasHuntGame {
 
     // Decorations
     this.drawDecorations();
+
+    // Team base trees (for capture mode)
+    if (this.gameMode === 'capture') {
+      this.drawTeamTrees();
+    }
 
     // Gifts
     this.gifts.forEach(gift => this.drawGift(gift));
@@ -1823,6 +1919,256 @@ class ChristmasHuntGame {
     el.style.top = sy + 'px';
     document.body.appendChild(el);
     setTimeout(() => el.remove(), 2000);
+  }
+
+  // ============ CAPTURE THE TREE MODE UI ============
+
+  drawTeamTrees() {
+    const ctx = this.ctx;
+
+    for (const [teamId, team] of this.teams) {
+      // Skip teams without tree positions
+      if (team.treeX === undefined || team.treeY === undefined) continue;
+
+      const sx = team.treeX - this.camera.x;
+      const sy = team.treeY - this.camera.y;
+
+      // Skip if off screen
+      if (sx < -150 || sx > this.canvas.width + 150) continue;
+      if (sy < -200 || sy > this.canvas.height + 200) continue;
+
+      // Draw capture zone circle
+      ctx.strokeStyle = team.color + '60';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([10, 5]);
+      ctx.beginPath();
+      ctx.arc(sx, sy, 80, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Draw glow around tree
+      const glowGradient = ctx.createRadialGradient(sx, sy - 30, 0, sx, sy - 30, 100);
+      glowGradient.addColorStop(0, team.color + '40');
+      glowGradient.addColorStop(1, 'transparent');
+      ctx.fillStyle = glowGradient;
+      ctx.beginPath();
+      ctx.arc(sx, sy - 30, 100, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw big Christmas tree
+      this.drawBigTree(sx, sy, team.color, team.name);
+
+      // Draw team label
+      ctx.fillStyle = team.color;
+      ctx.font = 'bold 14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(team.name + "'s Tree", sx, sy + 80);
+
+      // Indicate if this is player's own tree or enemy tree
+      if (this.player && this.player.team) {
+        if (this.player.team === teamId) {
+          ctx.fillStyle = '#4ecdc4';
+          ctx.font = '12px sans-serif';
+          ctx.fillText('DEFEND', sx, sy + 95);
+        } else {
+          ctx.fillStyle = '#ff6b6b';
+          ctx.font = '12px sans-serif';
+          ctx.fillText('CAPTURE!', sx, sy + 95);
+        }
+      }
+    }
+  }
+
+  drawBigTree(x, y, teamColor, teamName) {
+    const ctx = this.ctx;
+    const scale = 2.5;
+    const size = 35 * scale;
+
+    // Snow base
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.beginPath();
+    ctx.ellipse(x, y + 20 * scale, 30 * scale, 10 * scale, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Trunk
+    ctx.fillStyle = '#5d4037';
+    ctx.fillRect(x - 6 * scale, y, 12 * scale, 20 * scale);
+
+    // Tree layers with team color tint
+    const layers = [
+      { w: size, h: size * 0.5 },
+      { w: size * 0.8, h: size * 0.45 },
+      { w: size * 0.6, h: size * 0.4 },
+      { w: size * 0.4, h: size * 0.35 }
+    ];
+
+    let oy = 0;
+    layers.forEach((l, i) => {
+      // Mix team color with green
+      const greenBase = [45, 90, 39];
+      const r = parseInt(teamColor.slice(1, 3), 16);
+      const g = parseInt(teamColor.slice(3, 5), 16);
+      const b = parseInt(teamColor.slice(5, 7), 16);
+      const mix = 0.3;
+      const finalR = Math.floor(greenBase[0] * (1 - mix) + r * mix);
+      const finalG = Math.floor(greenBase[1] * (1 - mix) + g * mix);
+      const finalB = Math.floor(greenBase[2] * (1 - mix) + b * mix);
+
+      ctx.fillStyle = `rgb(${finalR}, ${finalG}, ${finalB})`;
+      ctx.beginPath();
+      ctx.moveTo(x, y - oy - l.h);
+      ctx.lineTo(x - l.w / 2, y - oy);
+      ctx.lineTo(x + l.w / 2, y - oy);
+      ctx.closePath();
+      ctx.fill();
+
+      // Snow on edges
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+      ctx.beginPath();
+      ctx.moveTo(x, y - oy - l.h + 4);
+      ctx.lineTo(x - l.w / 2 + 8, y - oy);
+      ctx.lineTo(x - l.w / 4, y - oy - l.h * 0.3);
+      ctx.closePath();
+      ctx.fill();
+
+      oy += l.h * 0.45;
+    });
+
+    // Christmas lights
+    const lightColors = ['#ff0000', '#00ff00', '#ffff00', '#0080ff', '#ff00ff'];
+    const treeHeight = size * 1.2;
+
+    for (let i = 0; i < 6; i++) {
+      const progress = (i + 0.5) / 6;
+      const ly = y - progress * treeHeight;
+      const layerWidth = size * (1 - progress * 0.5);
+      const numLights = Math.floor(4 + (1 - progress) * 4);
+
+      for (let j = 0; j < numLights; j++) {
+        const lx = x + ((j / (numLights - 1)) - 0.5) * layerWidth * 0.7;
+        const colorIdx = (i + j) % lightColors.length;
+        const twinkle = Math.sin(this.animationTime * 5 + i * 2 + j * 3) * 0.4 + 0.6;
+
+        ctx.globalAlpha = twinkle * 0.6;
+        ctx.fillStyle = lightColors[colorIdx];
+        ctx.beginPath();
+        ctx.arc(lx, ly, 6, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = twinkle;
+        ctx.beginPath();
+        ctx.arc(lx, ly, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // Star on top with team color glow
+    ctx.shadowColor = teamColor;
+    ctx.shadowBlur = 25;
+    ctx.fillStyle = '#ffd700';
+    this.drawStar(x, y - oy - 8, 5, 15, 7);
+    ctx.shadowBlur = 0;
+  }
+
+  updateRoundTimer() {
+    const timerPanel = document.getElementById('round-timer-panel');
+    const timerEl = document.getElementById('round-timer');
+    if (!timerEl) return;
+
+    // Show panel when player is on a team
+    const playerTeam = this.player?.team;
+    if (timerPanel) {
+      timerPanel.style.display = playerTeam ? 'block' : 'none';
+    }
+
+    if (!this.roundActive) {
+      timerEl.textContent = 'Waiting...';
+      timerEl.style.color = '#888';
+      return;
+    }
+
+    const timeLeft = Math.max(0, this.roundEndTime - Date.now());
+    const seconds = Math.floor(timeLeft / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+
+    timerEl.textContent = `${minutes}:${secs.toString().padStart(2, '0')}`;
+
+    // Color based on time
+    if (seconds <= 30) {
+      timerEl.style.color = '#ff4444';
+    } else if (seconds <= 60) {
+      timerEl.style.color = '#ffa500';
+    } else {
+      timerEl.style.color = '#4ecdc4';
+    }
+  }
+
+  updateHitsDisplay() {
+    const hitsPanel = document.getElementById('hits-panel');
+    const hitsEl = document.getElementById('hits-display');
+    if (!hitsEl || !this.player) return;
+
+    // Show panel when player is on a team
+    const playerTeam = this.player?.team;
+    if (hitsPanel) {
+      hitsPanel.style.display = playerTeam ? 'flex' : 'none';
+    }
+
+    const hits = this.player.hits || 0;
+    hitsEl.innerHTML = '';
+
+    for (let i = 0; i < this.hitsToRespawn; i++) {
+      const dot = document.createElement('div');
+      dot.className = 'hit-dot' + (i < hits ? ' hit' : '');
+      hitsEl.appendChild(dot);
+    }
+  }
+
+  showRoundEndScreen(data) {
+    const overlay = document.getElementById('round-end-overlay');
+    if (!overlay) return;
+
+    const titleEl = document.getElementById('round-end-title');
+    const winnerEl = document.getElementById('round-end-winner');
+    const statsEl = document.getElementById('round-end-stats');
+    const messageEl = document.getElementById('round-end-message');
+
+    if (data.reason === 'capture') {
+      titleEl.textContent = 'TREE CAPTURED!';
+      winnerEl.textContent = `${data.winnerName} WINS!`;
+      winnerEl.style.color = this.teams.get(data.winner)?.color || '#fff';
+      statsEl.textContent = `${data.capturedBy} captured the tree!`;
+    } else if (data.reason === 'gifts') {
+      titleEl.textContent = "TIME'S UP!";
+      winnerEl.textContent = `${data.winnerName} WINS!`;
+      winnerEl.style.color = this.teams.get(data.winner)?.color || '#fff';
+      statsEl.textContent = `${data.gifts} gifts collected`;
+    } else {
+      titleEl.textContent = "TIME'S UP!";
+      winnerEl.textContent = "IT'S A TIE!";
+      winnerEl.style.color = '#fff';
+      statsEl.textContent = '';
+    }
+
+    messageEl.textContent = 'Next round starting...';
+    overlay.style.display = 'flex';
+
+    setTimeout(() => {
+      overlay.style.display = 'none';
+    }, 4500);
+  }
+
+  showTreeCaptureEffect(data) {
+    // Big particle explosion
+    const team = this.teams.get(data.capturedTeam);
+    if (team) {
+      for (let i = 0; i < 50; i++) {
+        this.spawnParticles(team.treeX, team.treeY, team.color, 10, 8);
+      }
+    }
+    this.triggerScreenShake(15);
   }
 }
 

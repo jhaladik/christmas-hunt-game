@@ -12,6 +12,13 @@ const MAX_POWERUPS = 15;
 const MAX_GRINCHES = 5;
 const MAX_SNOWBALLS = 100;
 
+// Capture the Tree game mode constants
+const ROUND_DURATION = 180000; // 3 minutes
+const FREEZE_DURATION = 5000; // 5 seconds freeze on hit
+const HITS_TO_RESPAWN = 3; // 3 hits = respawn
+const TREE_CAPTURE_RADIUS = 80; // Distance to capture tree
+const TREE_CAPTURE_TIME = 3000; // 3 seconds to capture
+
 const LEVELS = [
   { name: 'Beginner', giftsRequired: 0, speed: 5, giftPoints: 10 },
   { name: 'Collector', giftsRequired: 10, speed: 6, giftPoints: 15 },
@@ -52,14 +59,43 @@ export class GameRoom {
     this.powerupIdCounter = 0;
     this.grinchIdCounter = 0;
     this.snowballIdCounter = 0;
-    this.gameMode = 'ffa';
+    this.gameMode = 'capture'; // Default to capture the tree mode
     this.weather = 'clear';
     this.timeOfDay = 'day';
     this.dayProgress = 0;
 
-    // Initialize default teams
-    this.teams.set('red', { id: 'red', name: 'Red Team', color: '#ff4444', score: 0, members: [] });
-    this.teams.set('blue', { id: 'blue', name: 'Blue Team', color: '#4444ff', score: 0, members: [] });
+    // Capture the Tree game state
+    this.roundActive = false;
+    this.roundStartTime = 0;
+    this.roundEndTime = 0;
+    this.teamTrees = new Map();
+    this.captureProgress = new Map(); // playerId -> { treeTeam, startTime }
+
+    // Initialize default teams with spawn positions and trees
+    this.teams.set('red', {
+      id: 'red',
+      name: 'Red Team',
+      color: '#ff4444',
+      score: 0,
+      wins: 0,
+      members: [],
+      spawnX: 200,
+      spawnY: WORLD_HEIGHT / 2,
+      treeX: 150,
+      treeY: WORLD_HEIGHT / 2
+    });
+    this.teams.set('blue', {
+      id: 'blue',
+      name: 'Blue Team',
+      color: '#4444ff',
+      score: 0,
+      wins: 0,
+      members: [],
+      spawnX: WORLD_WIDTH - 200,
+      spawnY: WORLD_HEIGHT / 2,
+      treeX: WORLD_WIDTH - 150,
+      treeY: WORLD_HEIGHT / 2
+    });
 
     // Generate static obstacles
     this.generateObstacles();
@@ -69,7 +105,15 @@ export class GameRoom {
       const stored = await this.state.storage.get('gameState');
       if (stored) {
         this.gifts = new Map(stored.gifts || []);
-        this.teams = new Map(stored.teams || []);
+        // Load teams and ensure tree positions are set
+        const loadedTeams = new Map(stored.teams || []);
+        for (const [id, team] of loadedTeams) {
+          // Migrate old teams without tree positions
+          if (team.treeX === undefined) {
+            this.assignTreePosition(team);
+          }
+          this.teams.set(id, team);
+        }
         this.giftIdCounter = stored.giftIdCounter || 0;
       }
     });
@@ -81,6 +125,8 @@ export class GameRoom {
     this.snowballUpdateLoop();
     this.weatherLoop();
     this.dayCycleLoop();
+    this.roundTimerLoop();
+    this.treeCaptureLoop();
   }
 
   generateObstacles() {
@@ -202,7 +248,7 @@ export class GameRoom {
       team: null,
       lastUpdate: Date.now(),
       powerups: {},
-      snowballs: 5,
+      snowballs: 10, // More snowballs for combat
       frozen: false,
       frozenUntil: 0,
       onIce: false,
@@ -210,7 +256,11 @@ export class GameRoom {
       inSnowdrift: false,
       onFrozenLake: false,
       lakeTimer: 0,
-      lastEmote: 0
+      lastEmote: 0,
+      // Capture the Tree stats
+      hits: 0, // Hits taken this round
+      captures: 0, // Trees captured
+      respawns: 0
     };
 
     session.playerId = playerId;
@@ -240,7 +290,12 @@ export class GameRoom {
       powerupTypes: POWERUP_TYPES,
       weather: this.weather,
       timeOfDay: this.timeOfDay,
-      emotes: EMOTES
+      emotes: EMOTES,
+      // Capture the Tree state
+      roundActive: this.roundActive,
+      roundEndTime: this.roundEndTime,
+      roundDuration: ROUND_DURATION,
+      hitsToRespawn: HITS_TO_RESPAWN
     });
 
     this.broadcast({ type: 'playerJoined', player }, session.ws);
@@ -290,8 +345,17 @@ export class GameRoom {
       speed *= 0.5;
     }
 
-    let dx = (data.dx || 0) * speed;
-    let dy = (data.dy || 0) * speed;
+    // Normalize direction to prevent faster diagonal movement
+    let dirX = data.dx || 0;
+    let dirY = data.dy || 0;
+    const dirLen = Math.sqrt(dirX * dirX + dirY * dirY);
+    if (dirLen > 1) {
+      dirX /= dirLen;
+      dirY /= dirLen;
+    }
+
+    let dx = dirX * speed;
+    let dy = dirY * speed;
 
     // Ice sliding
     if (player.onIce) {
@@ -639,7 +703,14 @@ export class GameRoom {
     player.team = data.teamId;
     team.members.push(player.id);
 
+    // Move player to team spawn
+    player.x = team.spawnX + (Math.random() - 0.5) * 50;
+    player.y = team.spawnY + (Math.random() - 0.5) * 50;
+    player.hits = 0; // Reset hits when joining team
+    player.snowballs = 10;
+
     this.broadcast({ type: 'playerTeamChanged', playerId: player.id, teamId: data.teamId });
+    this.broadcast({ type: 'playerMoved', playerId: player.id, x: player.x, y: player.y });
     this.addChatMessage({ type: 'system', text: `${player.name} joined ${team.name}!` });
   }
 
@@ -648,14 +719,25 @@ export class GameRoom {
     if (!player) return;
 
     const teamId = crypto.randomUUID().slice(0, 8);
+    const teamIndex = this.teams.size; // Use current team count for positioning
+
     const team = {
       id: teamId,
       name: data.name?.slice(0, 20) || `Team ${teamId}`,
       color: data.color || this.getRandomColor(),
       score: 0,
+      wins: 0,
       members: [player.id],
-      creator: player.id
+      creator: player.id,
+      // Default positions, will be updated below
+      spawnX: WORLD_WIDTH / 2,
+      spawnY: WORLD_HEIGHT / 2,
+      treeX: WORLD_WIDTH / 2,
+      treeY: WORLD_HEIGHT / 2
     };
+
+    // Assign tree position based on team index
+    this.assignTreePosition(team, teamIndex);
 
     this.teams.set(teamId, team);
 
@@ -666,8 +748,13 @@ export class GameRoom {
 
     player.team = teamId;
 
+    // Move player to team spawn
+    player.x = team.spawnX + (Math.random() - 0.5) * 50;
+    player.y = team.spawnY + (Math.random() - 0.5) * 50;
+
     this.broadcast({ type: 'teamCreated', team });
     this.broadcast({ type: 'playerTeamChanged', playerId: player.id, teamId });
+    this.broadcast({ type: 'playerMoved', playerId: player.id, x: player.x, y: player.y });
     this.addChatMessage({ type: 'system', text: `${player.name} created ${team.name}!` });
   }
 
@@ -882,14 +969,37 @@ export class GameRoom {
             // Hit!
             if (!player.powerups.shield || Date.now() >= player.powerups.shield) {
               player.frozen = true;
-              player.frozenUntil = now + 1500;
+              player.frozenUntil = now + FREEZE_DURATION; // 5 seconds freeze
+              player.hits = (player.hits || 0) + 1;
+
+              let respawned = false;
+
+              // Check if player should respawn (3 hits)
+              if (player.hits >= HITS_TO_RESPAWN) {
+                this.respawnPlayer(player);
+                respawned = true;
+              }
 
               this.broadcast({
                 type: 'snowballHit',
                 snowballId: id,
                 hitPlayerId: player.id,
-                thrownBy: sb.ownerId
+                thrownBy: sb.ownerId,
+                hits: player.hits,
+                hitsToRespawn: HITS_TO_RESPAWN,
+                respawned,
+                playerX: player.x,
+                playerY: player.y
               });
+
+              if (respawned) {
+                const thrower = this.players.get(sb.ownerId);
+                const throwerName = thrower ? thrower.name : 'Turret';
+                this.addChatMessage({
+                  type: 'system',
+                  text: `💥 ${throwerName} knocked out ${player.name}!`
+                });
+              }
             }
             toRemove.push(id);
             break;
@@ -1022,5 +1132,275 @@ export class GameRoom {
         try { ws.send(message); } catch (e) {}
       }
     }
+  }
+
+  // ============ CAPTURE THE TREE MODE ============
+
+  respawnPlayer(player) {
+    // Reset hits
+    player.hits = 0;
+    player.respawns = (player.respawns || 0) + 1;
+    player.frozen = false;
+    player.frozenUntil = 0;
+
+    // Spawn at team's spawn point or random if no team
+    if (player.team && this.teams.has(player.team)) {
+      const team = this.teams.get(player.team);
+      player.x = team.spawnX + (Math.random() - 0.5) * 100;
+      player.y = team.spawnY + (Math.random() - 0.5) * 100;
+    } else {
+      const pos = this.getSafeSpawnPosition();
+      player.x = pos.x;
+      player.y = pos.y;
+    }
+
+    // Refill snowballs on respawn
+    player.snowballs = 10;
+  }
+
+  getTeamSpawnPosition(teamId) {
+    const team = this.teams.get(teamId);
+    if (team) {
+      return {
+        x: team.spawnX + (Math.random() - 0.5) * 100,
+        y: team.spawnY + (Math.random() - 0.5) * 100
+      };
+    }
+    return this.getSafeSpawnPosition();
+  }
+
+  roundTimerLoop() {
+    setInterval(() => {
+      if (this.gameMode !== 'capture') return;
+
+      const now = Date.now();
+      const teamsWithPlayers = this.getTeamsWithPlayers();
+
+      // Start round if we have at least 1 team with players (allows solo testing)
+      // In production, you might want to require 2 teams
+      if (!this.roundActive && teamsWithPlayers.length >= 1) {
+        this.startRound();
+      }
+
+      // Check if round should end
+      if (this.roundActive && now >= this.roundEndTime) {
+        this.endRoundByTime();
+      }
+
+      // Broadcast timer update every second
+      if (this.roundActive) {
+        const timeLeft = Math.max(0, this.roundEndTime - now);
+        this.broadcast({
+          type: 'roundTimer',
+          timeLeft,
+          roundEndTime: this.roundEndTime
+        });
+      }
+    }, 1000);
+  }
+
+  getTeamsWithPlayers() {
+    const teamsWithPlayers = [];
+    for (const [teamId, team] of this.teams) {
+      const playerCount = Array.from(this.players.values()).filter(p => p.team === teamId).length;
+      if (playerCount > 0) {
+        teamsWithPlayers.push({ teamId, team, playerCount });
+      }
+    }
+    return teamsWithPlayers;
+  }
+
+  startRound() {
+    this.roundActive = true;
+    this.roundStartTime = Date.now();
+    this.roundEndTime = this.roundStartTime + ROUND_DURATION;
+
+    // Reset all players for new round
+    for (const player of this.players.values()) {
+      player.hits = 0;
+      player.giftsCollected = 0;
+      player.snowballs = 10;
+
+      // Move to team spawn
+      if (player.team && this.teams.has(player.team)) {
+        const pos = this.getTeamSpawnPosition(player.team);
+        player.x = pos.x;
+        player.y = pos.y;
+      }
+    }
+
+    // Reset team scores for this round
+    for (const team of this.teams.values()) {
+      team.roundGifts = 0;
+    }
+
+    // Clear old gifts and spawn new ones
+    this.gifts.clear();
+    for (let i = 0; i < 30; i++) {
+      this.spawnGift();
+    }
+
+    this.broadcast({
+      type: 'roundStart',
+      roundEndTime: this.roundEndTime,
+      roundDuration: ROUND_DURATION
+    });
+
+    this.addChatMessage({
+      type: 'system',
+      text: `🎄 ROUND STARTED! Capture enemy tree or collect the most gifts in 3 minutes!`
+    });
+  }
+
+  endRoundByTime() {
+    this.roundActive = false;
+
+    // Count gifts per team
+    const teamGifts = new Map();
+    for (const player of this.players.values()) {
+      if (player.team) {
+        const current = teamGifts.get(player.team) || 0;
+        teamGifts.set(player.team, current + (player.giftsCollected || 0));
+      }
+    }
+
+    // Find winner (team with most gifts)
+    let winnerTeamId = null;
+    let maxGifts = -1;
+    let tie = false;
+
+    for (const [teamId, gifts] of teamGifts) {
+      if (gifts > maxGifts) {
+        maxGifts = gifts;
+        winnerTeamId = teamId;
+        tie = false;
+      } else if (gifts === maxGifts) {
+        tie = true;
+      }
+    }
+
+    if (tie || winnerTeamId === null) {
+      this.broadcast({
+        type: 'roundEnd',
+        winner: null,
+        reason: 'tie',
+        teamGifts: Object.fromEntries(teamGifts)
+      });
+      this.addChatMessage({
+        type: 'system',
+        text: `⏰ TIME'S UP! It's a TIE!`
+      });
+    } else {
+      const winnerTeam = this.teams.get(winnerTeamId);
+      winnerTeam.wins = (winnerTeam.wins || 0) + 1;
+
+      this.broadcast({
+        type: 'roundEnd',
+        winner: winnerTeamId,
+        winnerName: winnerTeam.name,
+        reason: 'gifts',
+        gifts: maxGifts,
+        teamGifts: Object.fromEntries(teamGifts)
+      });
+
+      this.addChatMessage({
+        type: 'system',
+        text: `⏰ TIME'S UP! ${winnerTeam.name} WINS with ${maxGifts} gifts! 🏆`
+      });
+    }
+
+    // Auto-start new round after 5 seconds
+    setTimeout(() => {
+      if (this.getTeamsWithPlayers().length >= 1) {
+        this.startRound();
+      }
+    }, 5000);
+  }
+
+  treeCaptureLoop() {
+    setInterval(() => {
+      if (this.gameMode !== 'capture' || !this.roundActive) return;
+
+      // Check each player against enemy trees
+      for (const player of this.players.values()) {
+        if (!player.team || player.frozen) continue;
+
+        // Check distance to each enemy team's tree
+        for (const [teamId, team] of this.teams) {
+          if (teamId === player.team) continue; // Skip own tree
+
+          const dx = player.x - team.treeX;
+          const dy = player.y - team.treeY;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+
+          if (dist < TREE_CAPTURE_RADIUS) {
+            // Player is capturing this tree!
+            this.captureTree(player, teamId);
+            return; // End round immediately
+          }
+        }
+      }
+    }, 100);
+  }
+
+  captureTree(player, capturedTeamId) {
+    this.roundActive = false;
+
+    const playerTeam = this.teams.get(player.team);
+    const capturedTeam = this.teams.get(capturedTeamId);
+
+    playerTeam.wins = (playerTeam.wins || 0) + 1;
+    player.captures = (player.captures || 0) + 1;
+
+    this.broadcast({
+      type: 'treeCapture',
+      playerId: player.id,
+      playerName: player.name,
+      playerTeam: player.team,
+      capturedTeam: capturedTeamId,
+      capturedTeamName: capturedTeam.name,
+      winnerTeamName: playerTeam.name
+    });
+
+    this.broadcast({
+      type: 'roundEnd',
+      winner: player.team,
+      winnerName: playerTeam.name,
+      reason: 'capture',
+      capturedBy: player.name
+    });
+
+    this.addChatMessage({
+      type: 'system',
+      text: `🎄🏆 ${player.name} CAPTURED ${capturedTeam.name}'s TREE! ${playerTeam.name} WINS!`
+    });
+
+    // Auto-start new round after 5 seconds
+    setTimeout(() => {
+      if (this.getTeamsWithPlayers().length >= 1) {
+        this.startRound();
+      }
+    }, 5000);
+  }
+
+  // Update handleCreateTeam to assign tree position
+  assignTreePosition(team, teamIndex) {
+    // Distribute trees around the map edges
+    const positions = [
+      { spawnX: 200, spawnY: WORLD_HEIGHT / 2, treeX: 150, treeY: WORLD_HEIGHT / 2 }, // Left
+      { spawnX: WORLD_WIDTH - 200, spawnY: WORLD_HEIGHT / 2, treeX: WORLD_WIDTH - 150, treeY: WORLD_HEIGHT / 2 }, // Right
+      { spawnX: WORLD_WIDTH / 2, spawnY: 200, treeX: WORLD_WIDTH / 2, treeY: 150 }, // Top
+      { spawnX: WORLD_WIDTH / 2, spawnY: WORLD_HEIGHT - 200, treeX: WORLD_WIDTH / 2, treeY: WORLD_HEIGHT - 150 }, // Bottom
+      { spawnX: 300, spawnY: 300, treeX: 200, treeY: 200 }, // Top-left
+      { spawnX: WORLD_WIDTH - 300, spawnY: 300, treeX: WORLD_WIDTH - 200, treeY: 200 }, // Top-right
+      { spawnX: 300, spawnY: WORLD_HEIGHT - 300, treeX: 200, treeY: WORLD_HEIGHT - 200 }, // Bottom-left
+      { spawnX: WORLD_WIDTH - 300, spawnY: WORLD_HEIGHT - 300, treeX: WORLD_WIDTH - 200, treeY: WORLD_HEIGHT - 200 }, // Bottom-right
+    ];
+
+    const pos = positions[teamIndex % positions.length];
+    team.spawnX = pos.spawnX;
+    team.spawnY = pos.spawnY;
+    team.treeX = pos.treeX;
+    team.treeY = pos.treeY;
   }
 }
