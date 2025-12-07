@@ -2,6 +2,10 @@ name = "christmas-hunt-game"
 main = "src/worker.js"
 compatibility_date = "2024-01-01"
 
+routes = [
+  { pattern = "game.ethicline.eu", custom_domain = true }
+]
+
 [durable_objects]
 bindings = [
   { name = "GAME_ROOM", class_name = "GameRoom" }

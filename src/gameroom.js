@@ -1,25 +1,15 @@
 // GameRoom - Durable Object for managing real-time multiplayer state
 
-const WORLD_WIDTH = 3000;
-const WORLD_HEIGHT = 2000;
-const GIFT_SPAWN_INTERVAL = 5000;
-const POWERUP_SPAWN_INTERVAL = 8000;
+import { getLevel, OBJECT_TYPES } from './levels.js';
+
+// Default constants (can be overridden by level)
 const GRINCH_UPDATE_INTERVAL = 100;
 const WEATHER_CHANGE_INTERVAL = 60000;
 const DAY_CYCLE_INTERVAL = 120000;
-const MAX_GIFTS = 50;
-const MAX_POWERUPS = 15;
-const MAX_GRINCHES = 5;
 const MAX_SNOWBALLS = 100;
 
-// Capture the Tree game mode constants
-const ROUND_DURATION = 180000; // 3 minutes
-const FREEZE_DURATION = 5000; // 5 seconds freeze on hit
-const HITS_TO_RESPAWN = 3; // 3 hits = respawn
-const TREE_CAPTURE_RADIUS = 80; // Distance to capture tree
-const TREE_CAPTURE_TIME = 3000; // 3 seconds to capture
-
-const LEVELS = [
+// Player progression levels
+const PLAYER_LEVELS = [
   { name: 'Beginner', giftsRequired: 0, speed: 5, giftPoints: 10 },
   { name: 'Collector', giftsRequired: 10, speed: 6, giftPoints: 15 },
   { name: 'Hunter', giftsRequired: 30, speed: 7, giftPoints: 20 },
@@ -59,7 +49,6 @@ export class GameRoom {
     this.powerupIdCounter = 0;
     this.grinchIdCounter = 0;
     this.snowballIdCounter = 0;
-    this.gameMode = 'capture'; // Default to capture the tree mode
     this.weather = 'clear';
     this.timeOfDay = 'day';
     this.dayProgress = 0;
@@ -69,46 +58,18 @@ export class GameRoom {
     this.roundStartTime = 0;
     this.roundEndTime = 0;
     this.teamTrees = new Map();
-    this.captureProgress = new Map(); // playerId -> { treeTeam, startTime }
+    this.captureProgress = new Map();
 
-    // Initialize default teams with spawn positions and trees
-    this.teams.set('red', {
-      id: 'red',
-      name: 'Red Team',
-      color: '#ff4444',
-      score: 0,
-      wins: 0,
-      members: [],
-      spawnX: 200,
-      spawnY: WORLD_HEIGHT / 2,
-      treeX: 150,
-      treeY: WORLD_HEIGHT / 2
-    });
-    this.teams.set('blue', {
-      id: 'blue',
-      name: 'Blue Team',
-      color: '#4444ff',
-      score: 0,
-      wins: 0,
-      members: [],
-      spawnX: WORLD_WIDTH - 200,
-      spawnY: WORLD_HEIGHT / 2,
-      treeX: WORLD_WIDTH - 150,
-      treeY: WORLD_HEIGHT / 2
-    });
-
-    // Generate static obstacles
-    this.generateObstacles();
+    // Load level data
+    this.loadLevel('capture-christmas');
 
     // Load persisted state
     this.state.blockConcurrencyWhile(async () => {
       const stored = await this.state.storage.get('gameState');
       if (stored) {
         this.gifts = new Map(stored.gifts || []);
-        // Load teams and ensure tree positions are set
         const loadedTeams = new Map(stored.teams || []);
         for (const [id, team] of loadedTeams) {
-          // Migrate old teams without tree positions
           if (team.treeX === undefined) {
             this.assignTreePosition(team);
           }
@@ -129,120 +90,81 @@ export class GameRoom {
     this.treeCaptureLoop();
   }
 
-  generateObstacles() {
-    const seed = 54321;
-    const random = this.seededRandom(seed);
+  loadLevel(levelId) {
+    const level = getLevel(levelId);
+    this.level = level;
+    this.levelId = levelId;
+    this.gameMode = level.gameMode;
 
-    // SOLID OBSTACLES (block movement)
+    // Set world size from level
+    this.worldWidth = level.worldSize.width;
+    this.worldHeight = level.worldSize.height;
 
-    // Tree lines - horizontal barriers
-    const treeLinePositions = [
-      { startX: 400, startY: 400, count: 6, direction: 'horizontal' },
-      { startX: 1800, startY: 600, count: 5, direction: 'horizontal' },
-      { startX: 600, startY: 1400, count: 7, direction: 'horizontal' },
-      { startX: 2200, startY: 1200, count: 4, direction: 'horizontal' },
-      // Vertical tree lines
-      { startX: 1000, startY: 300, count: 5, direction: 'vertical' },
-      { startX: 2000, startY: 800, count: 4, direction: 'vertical' },
-      { startX: 500, startY: 1000, count: 3, direction: 'vertical' },
-    ];
+    // Load settings from level
+    const settings = level.settings || {};
+    this.roundDuration = settings.roundDuration || 180000;
+    this.freezeDuration = settings.freezeDuration || 5000;
+    this.hitsToRespawn = settings.hitsToRespawn || 3;
+    this.treeCaptureRadius = settings.treeCaptureRadius || 80;
+    this.initialSnowballs = settings.initialSnowballs || 10;
+    this.maxSnowballs = settings.maxSnowballs || 20;
 
-    let treeIdx = 0;
-    for (const line of treeLinePositions) {
-      for (let i = 0; i < line.count; i++) {
-        const spacing = 70;
-        const x = line.direction === 'horizontal' ? line.startX + i * spacing : line.startX;
-        const y = line.direction === 'vertical' ? line.startY + i * spacing : line.startY;
+    // Load spawner settings
+    const spawners = level.spawners || {};
+    this.giftSpawnInterval = spawners.gift?.interval || 5000;
+    this.maxGifts = spawners.gift?.maxCount || 50;
+    this.powerupSpawnInterval = spawners.powerup?.interval || 8000;
+    this.maxPowerups = spawners.powerup?.maxCount || 15;
+    this.maxGrinches = spawners.grinch?.maxCount || 5;
 
-        this.obstacles.set(`treeline_${treeIdx}`, {
-          id: `treeline_${treeIdx}`,
-          type: 'solidtree',
-          x: x,
-          y: y,
-          radius: 30,
-          solid: true
-        });
-        treeIdx++;
-      }
-    }
-
-    // Snowman barriers - clusters that block paths
-    const snowmanClusters = [
-      { x: 800, y: 800, count: 3 },
-      { x: 1500, y: 500, count: 4 },
-      { x: 2400, y: 400, count: 3 },
-      { x: 1200, y: 1600, count: 4 },
-      { x: 2600, y: 1500, count: 3 },
-      { x: 400, y: 1800, count: 2 },
-    ];
-
-    let snowmanIdx = 0;
-    for (const cluster of snowmanClusters) {
-      for (let i = 0; i < cluster.count; i++) {
-        const angle = (i / cluster.count) * Math.PI * 2;
-        const dist = 40 + i * 25;
-        this.obstacles.set(`snowman_${snowmanIdx}`, {
-          id: `snowman_${snowmanIdx}`,
-          type: 'solidsnowman',
-          x: cluster.x + Math.cos(angle) * dist,
-          y: cluster.y + Math.sin(angle) * dist,
-          radius: 25,
-          solid: true
-        });
-        snowmanIdx++;
-      }
-    }
-
-    // NON-SOLID OBSTACLES (effects only)
-
-    // Ice patches (slippery, not solid)
-    for (let i = 0; i < 15; i++) {
-      this.obstacles.set(`ice_${i}`, {
-        id: `ice_${i}`,
-        type: 'ice',
-        x: 200 + random() * (WORLD_WIDTH - 400),
-        y: 200 + random() * (WORLD_HEIGHT - 400),
-        radius: 40 + random() * 60,
-        solid: false
+    // Initialize teams from level
+    for (const teamData of level.teams) {
+      this.teams.set(teamData.id, {
+        ...teamData,
+        score: 0,
+        wins: 0,
+        members: []
       });
     }
 
-    // Snowdrifts (slow down, not solid)
-    for (let i = 0; i < 20; i++) {
-      this.obstacles.set(`snow_${i}`, {
-        id: `snow_${i}`,
-        type: 'snowdrift',
-        x: 200 + random() * (WORLD_WIDTH - 400),
-        y: 200 + random() * (WORLD_HEIGHT - 400),
-        radius: 30 + random() * 40,
-        solid: false
+    // Load obstacles from level
+    this.loadObstaclesFromLevel(level);
+  }
+
+  loadObstaclesFromLevel(level) {
+    let obstacleIdx = 0;
+
+    // Load solid objects
+    for (const obj of level.objects || []) {
+      const objType = OBJECT_TYPES[obj.type] || {};
+      this.obstacles.set(`${obj.type}_${obstacleIdx}`, {
+        id: `${obj.type}_${obstacleIdx}`,
+        type: obj.type,
+        x: obj.x,
+        y: obj.y,
+        radius: objType.radius || obj.radius || 30,
+        solid: objType.solid !== false,
+        ...(obj.type === 'turret' ? {
+          lastShot: 0,
+          shootInterval: objType.shootIntervalMin + Math.random() * (objType.shootIntervalMax - objType.shootIntervalMin)
+        } : {})
       });
+      obstacleIdx++;
     }
 
-    // Snowball turrets (solid)
-    for (let i = 0; i < 6; i++) {
-      this.obstacles.set(`turret_${i}`, {
-        id: `turret_${i}`,
-        type: 'turret',
-        x: 300 + random() * (WORLD_WIDTH - 600),
-        y: 300 + random() * (WORLD_HEIGHT - 600),
-        radius: 25,
-        lastShot: 0,
-        shootInterval: 2500 + random() * 2000,
-        solid: true
+    // Load terrain
+    for (const terrain of level.terrain || []) {
+      const terrainType = OBJECT_TYPES[terrain.type] || {};
+      this.obstacles.set(`${terrain.type}_${obstacleIdx}`, {
+        id: `${terrain.type}_${obstacleIdx}`,
+        type: terrain.type,
+        x: terrain.x,
+        y: terrain.y,
+        radius: terrain.radius || terrainType.radius || 50,
+        solid: false,
+        effect: terrainType.effect
       });
-    }
-
-    // Frozen lakes (can fall through)
-    for (let i = 0; i < 4; i++) {
-      this.obstacles.set(`lake_${i}`, {
-        id: `lake_${i}`,
-        type: 'frozenlake',
-        x: 300 + random() * (WORLD_WIDTH - 600),
-        y: 300 + random() * (WORLD_HEIGHT - 600),
-        radius: 80 + random() * 60,
-        solid: false
-      });
+      obstacleIdx++;
     }
   }
 
@@ -334,7 +256,7 @@ export class GameRoom {
     this.players.set(playerId, player);
 
     // Spawn a Grinch if not enough
-    if (this.grinches.size < MAX_GRINCHES) {
+    if (this.grinches.size < this.maxGrinches) {
       this.spawnGrinch();
     }
 
@@ -342,7 +264,7 @@ export class GameRoom {
       type: 'welcome',
       playerId,
       player,
-      worldSize: { width: WORLD_WIDTH, height: WORLD_HEIGHT },
+      worldSize: { width: this.worldWidth, height: this.worldHeight },
       players: Array.from(this.players.values()),
       gifts: Array.from(this.gifts.values()),
       powerups: Array.from(this.powerups.values()),
@@ -352,7 +274,7 @@ export class GameRoom {
       teams: Array.from(this.teams.values()),
       chat: this.chat.slice(-50),
       gameMode: this.gameMode,
-      levels: LEVELS,
+      levels: PLAYER_LEVELS,
       powerupTypes: POWERUP_TYPES,
       weather: this.weather,
       timeOfDay: this.timeOfDay,
@@ -360,8 +282,8 @@ export class GameRoom {
       // Capture the Tree state
       roundActive: this.roundActive,
       roundEndTime: this.roundEndTime,
-      roundDuration: ROUND_DURATION,
-      hitsToRespawn: HITS_TO_RESPAWN
+      roundDuration: this.roundDuration,
+      hitsToRespawn: this.hitsToRespawn
     });
 
     this.broadcast({ type: 'playerJoined', player }, session.ws);
@@ -370,14 +292,17 @@ export class GameRoom {
 
   getSafeSpawnPosition() {
     for (let i = 0; i < 50; i++) {
-      const x = Math.random() * WORLD_WIDTH;
-      const y = Math.random() * WORLD_HEIGHT;
+      const x = Math.random() * this.worldWidth;
+      const y = Math.random() * this.worldHeight;
       let safe = true;
 
+      // Only check SOLID obstacles - gifts can spawn on ice, snowdrifts, etc.
       for (const obs of this.obstacles.values()) {
+        if (!obs.solid) continue;
         const dx = x - obs.x;
         const dy = y - obs.y;
-        if (Math.sqrt(dx*dx + dy*dy) < obs.radius + 50) {
+        // Use smaller buffer (30) so gifts can spawn closer to obstacles but still reachable
+        if (Math.sqrt(dx*dx + dy*dy) < obs.radius + 30) {
           safe = false;
           break;
         }
@@ -385,7 +310,7 @@ export class GameRoom {
 
       if (safe) return { x, y };
     }
-    return { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+    return { x: this.worldWidth / 2, y: this.worldHeight / 2 };
   }
 
   handleMove(session, data) {
@@ -398,7 +323,7 @@ export class GameRoom {
     }
     player.frozen = false;
 
-    const levelData = LEVELS[player.level] || LEVELS[0];
+    const levelData = PLAYER_LEVELS[player.level] || PLAYER_LEVELS[0];
     let speed = levelData.speed;
 
     // Speed powerup
@@ -433,8 +358,8 @@ export class GameRoom {
       player.iceVelocity = { x: 0, y: 0 };
     }
 
-    let newX = Math.max(0, Math.min(WORLD_WIDTH, player.x + dx));
-    let newY = Math.max(0, Math.min(WORLD_HEIGHT, player.y + dy));
+    let newX = Math.max(0, Math.min(this.worldWidth, player.x + dx));
+    let newY = Math.max(0, Math.min(this.worldHeight, player.y + dy));
 
     // Check solid obstacle collisions BEFORE moving
     const collision = this.checkSolidCollision(newX, newY, 18); // player radius ~18
@@ -444,8 +369,8 @@ export class GameRoom {
       const angle = Math.atan2(newY - collision.y, newX - collision.x);
       newX = collision.x + Math.cos(angle) * pushDist;
       newY = collision.y + Math.sin(angle) * pushDist;
-      newX = Math.max(0, Math.min(WORLD_WIDTH, newX));
-      newY = Math.max(0, Math.min(WORLD_HEIGHT, newY));
+      newX = Math.max(0, Math.min(this.worldWidth, newX));
+      newY = Math.max(0, Math.min(this.worldHeight, newY));
     }
 
     player.x = newX;
@@ -616,8 +541,11 @@ export class GameRoom {
     const leveledUp = newLevel > player.level;
     player.level = newLevel;
 
+    let teamScore = null;
     if (player.team && this.teams.has(player.team)) {
-      this.teams.get(player.team).score += points;
+      const team = this.teams.get(player.team);
+      team.score += points;
+      teamScore = team.score;
     }
 
     await this.saveState();
@@ -631,13 +559,15 @@ export class GameRoom {
       giftsCollected: player.giftsCollected,
       level: player.level,
       leveledUp,
-      snowballs: player.snowballs
+      snowballs: player.snowballs,
+      teamId: player.team,
+      teamScore: teamScore
     });
 
     if (leveledUp) {
       this.addChatMessage({
         type: 'system',
-        text: `🎉 ${player.name} reached level ${LEVELS[player.level].name}!`
+        text: `🎉 ${player.name} reached level ${PLAYER_LEVELS[player.level].name}!`
       });
     }
   }
@@ -775,8 +705,8 @@ export class GameRoom {
   }
 
   calculateLevel(giftsCollected) {
-    for (let i = LEVELS.length - 1; i >= 0; i--) {
-      if (giftsCollected >= LEVELS[i].giftsRequired) return i;
+    for (let i = PLAYER_LEVELS.length - 1; i >= 0; i--) {
+      if (giftsCollected >= PLAYER_LEVELS[i].giftsRequired) return i;
     }
     return 0;
   }
@@ -823,10 +753,10 @@ export class GameRoom {
       members: [player.id],
       creator: player.id,
       // Default positions, will be updated below
-      spawnX: WORLD_WIDTH / 2,
-      spawnY: WORLD_HEIGHT / 2,
-      treeX: WORLD_WIDTH / 2,
-      treeY: WORLD_HEIGHT / 2
+      spawnX: this.worldWidth / 2,
+      spawnY: this.worldHeight / 2,
+      treeX: this.worldWidth / 2,
+      treeY: this.worldHeight / 2
     };
 
     // Assign tree position based on team index
@@ -877,18 +807,18 @@ export class GameRoom {
   // Spawning loops
   spawnGiftsLoop() {
     setInterval(() => {
-      if (this.gifts.size < MAX_GIFTS && this.players.size > 0) {
+      if (this.gifts.size < this.maxGifts && this.players.size > 0) {
         this.spawnGift();
       }
-    }, GIFT_SPAWN_INTERVAL);
+    }, this.giftSpawnInterval);
   }
 
   spawnPowerupsLoop() {
     setInterval(() => {
-      if (this.powerups.size < MAX_POWERUPS && this.players.size > 0) {
+      if (this.powerups.size < this.maxPowerups && this.players.size > 0) {
         this.spawnPowerup();
       }
-    }, POWERUP_SPAWN_INTERVAL);
+    }, this.powerupSpawnInterval);
   }
 
   spawnGift() {
@@ -918,8 +848,8 @@ export class GameRoom {
 
     const gift = {
       id: giftId,
-      x: Math.max(0, Math.min(WORLD_WIDTH, x)),
-      y: Math.max(0, Math.min(WORLD_HEIGHT, y)),
+      x: Math.max(0, Math.min(this.worldWidth, x)),
+      y: Math.max(0, Math.min(this.worldHeight, y)),
       ...giftTypes[typeIndex],
       spawnTime: Date.now()
     };
@@ -1015,8 +945,8 @@ export class GameRoom {
         }
       }
 
-      grinch.x = Math.max(0, Math.min(WORLD_WIDTH, newX));
-      grinch.y = Math.max(0, Math.min(WORLD_HEIGHT, newY));
+      grinch.x = Math.max(0, Math.min(this.worldWidth, newX));
+      grinch.y = Math.max(0, Math.min(this.worldHeight, newY));
     }
 
     // Check if caught a player
@@ -1040,8 +970,8 @@ export class GameRoom {
           const angle = Math.random() * Math.PI * 2;
           grinch.x += Math.cos(angle) * 200;
           grinch.y += Math.sin(angle) * 200;
-          grinch.x = Math.max(0, Math.min(WORLD_WIDTH, grinch.x));
-          grinch.y = Math.max(0, Math.min(WORLD_HEIGHT, grinch.y));
+          grinch.x = Math.max(0, Math.min(this.worldWidth, grinch.x));
+          grinch.y = Math.max(0, Math.min(this.worldHeight, grinch.y));
         }
       }
     }
@@ -1065,7 +995,7 @@ export class GameRoom {
         sb.y += sb.vy;
 
         // Remove if out of bounds or too old
-        if (sb.x < 0 || sb.x > WORLD_WIDTH || sb.y < 0 || sb.y > WORLD_HEIGHT || now - sb.createdAt > 3000) {
+        if (sb.x < 0 || sb.x > this.worldWidth || sb.y < 0 || sb.y > this.worldHeight || now - sb.createdAt > 3000) {
           toRemove.push(id);
           continue;
         }
@@ -1077,6 +1007,13 @@ export class GameRoom {
           const dist = Math.sqrt((obs.x - sb.x)**2 + (obs.y - sb.y)**2);
           if (dist < obs.radius + 8) { // 8 = snowball radius
             hitObstacle = true;
+            // Send splat effect at collision point
+            this.broadcast({
+              type: 'snowballSplat',
+              snowballId: id,
+              x: sb.x,
+              y: sb.y
+            });
             break;
           }
         }
@@ -1095,13 +1032,13 @@ export class GameRoom {
             // Hit!
             if (!player.powerups.shield || Date.now() >= player.powerups.shield) {
               player.frozen = true;
-              player.frozenUntil = now + FREEZE_DURATION; // 5 seconds freeze
+              player.frozenUntil = now + this.freezeDuration; // 5 seconds freeze
               player.hits = (player.hits || 0) + 1;
 
               let respawned = false;
 
               // Check if player should respawn (3 hits)
-              if (player.hits >= HITS_TO_RESPAWN) {
+              if (player.hits >= this.hitsToRespawn) {
                 this.respawnPlayer(player);
                 respawned = true;
               }
@@ -1112,7 +1049,7 @@ export class GameRoom {
                 hitPlayerId: player.id,
                 thrownBy: sb.ownerId,
                 hits: player.hits,
-                hitsToRespawn: HITS_TO_RESPAWN,
+                hitsToRespawn: this.hitsToRespawn,
                 respawned,
                 playerX: player.x,
                 playerY: player.y
@@ -1140,8 +1077,8 @@ export class GameRoom {
             const pushDist = 100;
             grinch.x += sb.vx * pushDist / 15;
             grinch.y += sb.vy * pushDist / 15;
-            grinch.x = Math.max(0, Math.min(WORLD_WIDTH, grinch.x));
-            grinch.y = Math.max(0, Math.min(WORLD_HEIGHT, grinch.y));
+            grinch.x = Math.max(0, Math.min(this.worldWidth, grinch.x));
+            grinch.y = Math.max(0, Math.min(this.worldHeight, grinch.y));
 
             this.broadcast({
               type: 'grinchHit',
@@ -1339,7 +1276,7 @@ export class GameRoom {
   startRound() {
     this.roundActive = true;
     this.roundStartTime = Date.now();
-    this.roundEndTime = this.roundStartTime + ROUND_DURATION;
+    this.roundEndTime = this.roundStartTime + this.roundDuration;
 
     // Reset all players for new round
     for (const player of this.players.values()) {
@@ -1369,7 +1306,7 @@ export class GameRoom {
     this.broadcast({
       type: 'roundStart',
       roundEndTime: this.roundEndTime,
-      roundDuration: ROUND_DURATION
+      roundDuration: this.roundDuration
     });
 
     this.addChatMessage({
@@ -1459,7 +1396,7 @@ export class GameRoom {
           const dy = player.y - team.treeY;
           const dist = Math.sqrt(dx * dx + dy * dy);
 
-          if (dist < TREE_CAPTURE_RADIUS) {
+          if (dist < this.treeCaptureRadius) {
             // Player is capturing this tree!
             this.captureTree(player, teamId);
             return; // End round immediately
@@ -1513,14 +1450,14 @@ export class GameRoom {
   assignTreePosition(team, teamIndex) {
     // Distribute trees around the map edges
     const positions = [
-      { spawnX: 200, spawnY: WORLD_HEIGHT / 2, treeX: 150, treeY: WORLD_HEIGHT / 2 }, // Left
-      { spawnX: WORLD_WIDTH - 200, spawnY: WORLD_HEIGHT / 2, treeX: WORLD_WIDTH - 150, treeY: WORLD_HEIGHT / 2 }, // Right
-      { spawnX: WORLD_WIDTH / 2, spawnY: 200, treeX: WORLD_WIDTH / 2, treeY: 150 }, // Top
-      { spawnX: WORLD_WIDTH / 2, spawnY: WORLD_HEIGHT - 200, treeX: WORLD_WIDTH / 2, treeY: WORLD_HEIGHT - 150 }, // Bottom
+      { spawnX: 200, spawnY: this.worldHeight / 2, treeX: 150, treeY: this.worldHeight / 2 }, // Left
+      { spawnX: this.worldWidth - 200, spawnY: this.worldHeight / 2, treeX: this.worldWidth - 150, treeY: this.worldHeight / 2 }, // Right
+      { spawnX: this.worldWidth / 2, spawnY: 200, treeX: this.worldWidth / 2, treeY: 150 }, // Top
+      { spawnX: this.worldWidth / 2, spawnY: this.worldHeight - 200, treeX: this.worldWidth / 2, treeY: this.worldHeight - 150 }, // Bottom
       { spawnX: 300, spawnY: 300, treeX: 200, treeY: 200 }, // Top-left
-      { spawnX: WORLD_WIDTH - 300, spawnY: 300, treeX: WORLD_WIDTH - 200, treeY: 200 }, // Top-right
-      { spawnX: 300, spawnY: WORLD_HEIGHT - 300, treeX: 200, treeY: WORLD_HEIGHT - 200 }, // Bottom-left
-      { spawnX: WORLD_WIDTH - 300, spawnY: WORLD_HEIGHT - 300, treeX: WORLD_WIDTH - 200, treeY: WORLD_HEIGHT - 200 }, // Bottom-right
+      { spawnX: this.worldWidth - 300, spawnY: 300, treeX: this.worldWidth - 200, treeY: 200 }, // Top-right
+      { spawnX: 300, spawnY: this.worldHeight - 300, treeX: 200, treeY: this.worldHeight - 200 }, // Bottom-left
+      { spawnX: this.worldWidth - 300, spawnY: this.worldHeight - 300, treeX: this.worldWidth - 200, treeY: this.worldHeight - 200 }, // Bottom-right
     ];
 
     const pos = positions[teamIndex % positions.length];

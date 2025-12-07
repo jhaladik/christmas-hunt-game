@@ -64,6 +64,8 @@ class ChristmasHuntGame {
     this.screenShake = { x: 0, y: 0, intensity: 0 };
     this.lastPlayerPos = { x: 0, y: 0 };
     this.animationTime = 0;
+    this.idleTime = 0; // Track how long player has been idle
+    this.playerAnimStates = new Map(); // Track animation state for all players
 
     // Stars for night sky
     this.stars = [];
@@ -233,6 +235,14 @@ class ChristmasHuntGame {
           collector.score = data.playerScore;
           collector.level = data.level;
         }
+        // Update team score if provided
+        if (data.teamId && data.teamScore !== null) {
+          const team = this.teams.get(data.teamId);
+          if (team) {
+            team.score = data.teamScore;
+            this.updateTeamsPanel();
+          }
+        }
         this.updateLeaderboard();
         break;
       case 'powerupSpawned':
@@ -272,6 +282,8 @@ class ChristmasHuntGame {
       case 'grinchHit':
         const gh = this.grinches.get(data.grinchId);
         if (gh) { gh.x = data.x; gh.y = data.y; }
+        // Green particles on grinch hit
+        this.spawnParticles(data.x, data.y, '#44ff44', 12, 5);
         break;
       case 'snowballThrown':
         this.snowballs.set(data.snowball.id, data.snowball);
@@ -283,8 +295,15 @@ class ChristmasHuntGame {
       case 'snowballRemoved':
         this.snowballs.delete(data.snowballId);
         break;
+      case 'snowballSplat':
+        this.snowballs.delete(data.snowballId);
+        // White snow particles on obstacle hit
+        this.spawnParticles(data.x, data.y, '#ffffff', 8, 4);
+        break;
       case 'snowballHit':
         this.snowballs.delete(data.snowballId);
+        // Ice blue particles on player hit
+        this.spawnParticles(data.playerX, data.playerY, '#87ceeb', 15, 5);
         if (data.hitPlayerId === this.playerId) {
           this.player.frozen = true;
           this.showFrozenOverlay();
@@ -622,6 +641,7 @@ class ChristmasHuntGame {
       // Update facing direction
       this.facingDirX = dx;
       this.facingDirY = dy;
+      this.idleTime = 0; // Reset idle time when moving
 
       this.ws.send(JSON.stringify({ type: 'move', dx, dy }));
 
@@ -644,7 +664,30 @@ class ChristmasHuntGame {
 
       this.player.x = Math.max(0, Math.min(this.worldSize.width, this.player.x + dx * speed));
       this.player.y = Math.max(0, Math.min(this.worldSize.height, this.player.y + dy * speed));
+    } else {
+      // Not moving, increment idle time
+      this.idleTime++;
     }
+
+    // Update animation states for other players (track their movement direction)
+    this.players.forEach((p, id) => {
+      if (!this.playerAnimStates.has(id)) {
+        this.playerAnimStates.set(id, { lastX: p.x, lastY: p.y, dirX: 1, dirY: 0, idleTime: 0 });
+      }
+      const state = this.playerAnimStates.get(id);
+      const dx = p.x - state.lastX;
+      const dy = p.y - state.lastY;
+      if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+        const len = Math.sqrt(dx*dx + dy*dy);
+        state.dirX = dx / len;
+        state.dirY = dy / len;
+        state.idleTime = 0;
+      } else {
+        state.idleTime++;
+      }
+      state.lastX = p.x;
+      state.lastY = p.y;
+    });
 
     // Auto-collect gifts and powerups (with duplicate prevention)
     this.gifts.forEach((gift, id) => {
@@ -706,8 +749,8 @@ class ChristmasHuntGame {
   render() {
     const ctx = this.ctx;
 
-    // Update animation time
-    this.animationTime += 0.016;
+    // Update animation time (use real time for smooth animations)
+    this.animationTime = performance.now() / 1000;
 
     // Apply screen shake
     if (this.screenShake.intensity > 0) {
@@ -975,75 +1018,100 @@ class ChristmasHuntGame {
     if (sx < -200 || sx > this.canvas.width + 200) return;
     if (sy < -200 || sy > this.canvas.height + 200) return;
 
+    // Use object registry for rendering if available
+    const objType = window.OBJECT_TYPES ? window.OBJECT_TYPES[obs.type] : null;
+    if (objType && objType.render && typeof this[objType.render] === 'function') {
+      this[objType.render](sx, sy, obs.radius, obs);
+      return;
+    }
+
+    // Fallback rendering for unknown types
     switch (obs.type) {
       case 'ice':
-        ctx.fillStyle = 'rgba(135, 206, 235, 0.4)';
-        ctx.beginPath();
-        ctx.arc(sx, sy, obs.radius, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-        ctx.lineWidth = 2;
-        ctx.stroke();
+        this.drawIce(sx, sy, obs.radius, obs);
         break;
-
       case 'snowdrift':
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-        ctx.beginPath();
-        ctx.ellipse(sx, sy, obs.radius, obs.radius * 0.5, 0, 0, Math.PI * 2);
-        ctx.fill();
+        this.drawSnowdrift(sx, sy, obs.radius, obs);
         break;
-
       case 'turret':
-        // Base
-        ctx.fillStyle = '#555';
-        ctx.beginPath();
-        ctx.arc(sx, sy, obs.radius, 0, Math.PI * 2);
-        ctx.fill();
-        // Top
-        ctx.fillStyle = '#888';
-        ctx.beginPath();
-        ctx.arc(sx, sy, obs.radius * 0.6, 0, Math.PI * 2);
-        ctx.fill();
-        // Cannon
-        ctx.fillStyle = '#333';
-        ctx.fillRect(sx - 5, sy - obs.radius - 10, 10, 15);
+        this.drawTurret(sx, sy, obs.radius, obs);
         break;
-
+      case 'frozenLake':
       case 'frozenlake':
-        ctx.fillStyle = 'rgba(100, 149, 237, 0.5)';
-        ctx.beginPath();
-        ctx.arc(sx, sy, obs.radius, 0, Math.PI * 2);
-        ctx.fill();
-        // Cracks
-        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-        ctx.lineWidth = 1;
-        for (let i = 0; i < 5; i++) {
-          const angle = (i / 5) * Math.PI * 2;
-          ctx.beginPath();
-          ctx.moveTo(sx, sy);
-          ctx.lineTo(sx + Math.cos(angle) * obs.radius * 0.8, sy + Math.sin(angle) * obs.radius * 0.8);
-          ctx.stroke();
-        }
-        // Warning
-        ctx.font = '12px sans-serif';
-        ctx.fillStyle = '#fff';
-        ctx.textAlign = 'center';
-        ctx.fillText('THIN ICE', sx, sy);
+        this.drawFrozenLake(sx, sy, obs.radius, obs);
         break;
-
+      case 'solidTree':
       case 'solidtree':
-        // Draw a solid tree barrier (simpler, darker tree to indicate solid)
         this.drawSolidTree(sx, sy, obs.radius);
         break;
-
+      case 'solidSnowman':
       case 'solidsnowman':
-        // Draw a solid snowman barrier
         this.drawSolidSnowman(sx, sy, obs.radius);
         break;
     }
   }
 
-  drawSolidTree(x, y, radius) {
+  // Terrain rendering methods
+  drawIce(sx, sy, radius, obs) {
+    const ctx = this.ctx;
+    ctx.fillStyle = 'rgba(135, 206, 235, 0.4)';
+    ctx.beginPath();
+    ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  drawSnowdrift(sx, sy, radius, obs) {
+    const ctx = this.ctx;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+    ctx.beginPath();
+    ctx.ellipse(sx, sy, radius, radius * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  drawTurret(sx, sy, radius, obs) {
+    const ctx = this.ctx;
+    // Base
+    ctx.fillStyle = '#555';
+    ctx.beginPath();
+    ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    // Top
+    ctx.fillStyle = '#888';
+    ctx.beginPath();
+    ctx.arc(sx, sy, radius * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+    // Cannon
+    ctx.fillStyle = '#333';
+    ctx.fillRect(sx - 5, sy - radius - 10, 10, 15);
+  }
+
+  drawFrozenLake(sx, sy, radius, obs) {
+    const ctx = this.ctx;
+    ctx.fillStyle = 'rgba(100, 149, 237, 0.5)';
+    ctx.beginPath();
+    ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    // Cracks
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 5; i++) {
+      const angle = (i / 5) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + Math.cos(angle) * radius * 0.8, sy + Math.sin(angle) * radius * 0.8);
+      ctx.stroke();
+    }
+    // Warning
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.fillText('THIN ICE', sx, sy);
+  }
+
+  drawSolidTree(x, y, radius, obs) {
     const ctx = this.ctx;
     const scale = radius / 30;
 
@@ -1096,7 +1164,7 @@ class ChristmasHuntGame {
     ctx.setLineDash([]);
   }
 
-  drawSolidSnowman(x, y, radius) {
+  drawSolidSnowman(x, y, radius, obs) {
     const ctx = this.ctx;
     const scale = radius / 25;
 
@@ -1235,7 +1303,7 @@ class ChristmasHuntGame {
       for (let j = 0; j < numLightsInRow; j++) {
         const lx = x + ((j / (numLightsInRow - 1)) - 0.5) * layerWidth * 0.7;
         const colorIdx = (i + j + Math.floor(x)) % lightColors.length;
-        const twinkle = Math.sin(this.animationTime * 5 + i * 2 + j * 3 + x) * 0.4 + 0.6;
+        const twinkle = Math.sin(this.animationTime * 2 + i * 1.5 + j * 2 + x * 0.01) * 0.3 + 0.7;
 
         // Light glow
         ctx.globalAlpha = twinkle * 0.5;
@@ -1328,7 +1396,9 @@ class ChristmasHuntGame {
     if (sy < -50 || sy > this.canvas.height + 50) return;
 
     const bob = Math.sin(Date.now() / 300 + gift.x) * 4;
-    const size = 25;
+    const giftType = window.OBJECT_TYPES ? window.OBJECT_TYPES.gift : null;
+    const radius = giftType ? giftType.radius : 20;
+    const size = radius * 1.25;
 
     // Glow
     const glow = ctx.createRadialGradient(sx, sy + bob, 0, sx, sy + bob, size * 1.5);
@@ -1375,7 +1445,9 @@ class ChristmasHuntGame {
     if (sy < -50 || sy > this.canvas.height + 50) return;
 
     const pulse = 1 + Math.sin(Date.now() / 200) * 0.1;
-    const size = 30 * pulse;
+    const powerupType = window.OBJECT_TYPES ? window.OBJECT_TYPES.powerup : null;
+    const radius = powerupType ? powerupType.radius : 20;
+    const size = radius * 1.5 * pulse;
 
     // Glow
     ctx.shadowColor = pu.color;
@@ -1402,15 +1474,18 @@ class ChristmasHuntGame {
     if (sx < -20 || sx > this.canvas.width + 20) return;
     if (sy < -20 || sy > this.canvas.height + 20) return;
 
+    const snowballType = window.OBJECT_TYPES ? window.OBJECT_TYPES.snowball : null;
+    const radius = snowballType ? snowballType.radius : 8;
+
     ctx.fillStyle = sb.fromTurret ? '#aaa' : '#fff';
     ctx.beginPath();
-    ctx.arc(sx, sy, 8, 0, Math.PI * 2);
+    ctx.arc(sx, sy, radius, 0, Math.PI * 2);
     ctx.fill();
 
     // Trail
     ctx.fillStyle = 'rgba(255,255,255,0.3)';
     ctx.beginPath();
-    ctx.arc(sx - sb.vx, sy - sb.vy, 5, 0, Math.PI * 2);
+    ctx.arc(sx - sb.vx, sy - sb.vy, radius * 0.6, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -1602,25 +1677,121 @@ class ChristmasHuntGame {
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    // Face
+    // Get animation state for this player
+    let lookDirX = 0, lookDirY = 0, idleFrames = 0;
+    if (isLocal) {
+      lookDirX = this.facingDirX;
+      lookDirY = this.facingDirY;
+      idleFrames = this.idleTime;
+    } else {
+      const animState = this.playerAnimStates.get(player.id);
+      if (animState) {
+        lookDirX = animState.dirX;
+        lookDirY = animState.dirY;
+        idleFrames = animState.idleTime;
+      } else {
+        lookDirX = 1;
+        lookDirY = 0;
+      }
+    }
+
+    // Calculate eye positions (base + look direction offset)
+    const leftEyeBaseX = sx - 5;
+    const rightEyeBaseX = sx + 5;
+    const eyeBaseY = sy - 3;
+    const eyeWhiteRadius = 3.5;
+    const pupilRadius = 1.8;
+
+    // Idle animation: eyes roll around after 120 frames (~2 seconds) of being idle
+    let pupilOffsetX = 0, pupilOffsetY = 0;
+    const idleThreshold = 120;
+
+    if (idleFrames > idleThreshold) {
+      // Rolling eyes animation - slower, more deliberate
+      const idleAnim = (idleFrames - idleThreshold) * 0.03;
+      const rollPhase = idleAnim % (Math.PI * 4); // Full cycle
+
+      if (rollPhase < Math.PI * 2) {
+        // Roll up and around
+        pupilOffsetX = Math.sin(rollPhase) * 1.5;
+        pupilOffsetY = -Math.cos(rollPhase) * 1.5;
+      } else {
+        // Blink occasionally
+        const blinkPhase = rollPhase - Math.PI * 2;
+        if (blinkPhase < 0.3 || (blinkPhase > 0.6 && blinkPhase < 0.9)) {
+          // Blink - draw squinted eyes instead
+          ctx.fillStyle = '#fff';
+          ctx.beginPath();
+          ctx.ellipse(leftEyeBaseX, eyeBaseY, eyeWhiteRadius, 1, 0, 0, Math.PI * 2);
+          ctx.ellipse(rightEyeBaseX, eyeBaseY, eyeWhiteRadius, 1, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#333';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(leftEyeBaseX - 3, eyeBaseY);
+          ctx.lineTo(leftEyeBaseX + 3, eyeBaseY);
+          ctx.moveTo(rightEyeBaseX - 3, eyeBaseY);
+          ctx.lineTo(rightEyeBaseX + 3, eyeBaseY);
+          ctx.stroke();
+          // Draw mouth
+          ctx.strokeStyle = '#333';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sx, sy + 2, 6, 0.1 * Math.PI, 0.9 * Math.PI);
+          ctx.stroke();
+          // Draw hat and extras then return
+          this.drawPlayerHatAndLabels(ctx, sx, sy, radius, player);
+          ctx.globalAlpha = 1;
+          return;
+        }
+        // Look around randomly
+        pupilOffsetX = Math.sin(blinkPhase * 3) * 1.5;
+        pupilOffsetY = Math.cos(blinkPhase * 2) * 1;
+      }
+    } else {
+      // Normal look direction - pupils follow movement direction
+      pupilOffsetX = lookDirX * 1.5;
+      pupilOffsetY = lookDirY * 1.5;
+    }
+
+    // Eye whites
     ctx.fillStyle = '#fff';
     ctx.beginPath();
-    ctx.arc(sx - 5, sy - 3, 3, 0, Math.PI * 2);
-    ctx.arc(sx + 5, sy - 3, 3, 0, Math.PI * 2);
+    ctx.arc(leftEyeBaseX, eyeBaseY, eyeWhiteRadius, 0, Math.PI * 2);
+    ctx.arc(rightEyeBaseX, eyeBaseY, eyeWhiteRadius, 0, Math.PI * 2);
     ctx.fill();
 
+    // Pupils (offset by look direction)
     ctx.fillStyle = '#333';
     ctx.beginPath();
-    ctx.arc(sx - 5, sy - 3, 1.5, 0, Math.PI * 2);
-    ctx.arc(sx + 5, sy - 3, 1.5, 0, Math.PI * 2);
+    ctx.arc(leftEyeBaseX + pupilOffsetX, eyeBaseY + pupilOffsetY, pupilRadius, 0, Math.PI * 2);
+    ctx.arc(rightEyeBaseX + pupilOffsetX, eyeBaseY + pupilOffsetY, pupilRadius, 0, Math.PI * 2);
     ctx.fill();
 
+    // Mouth - changes based on movement
     ctx.strokeStyle = '#333';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.arc(sx, sy + 2, 6, 0.1 * Math.PI, 0.9 * Math.PI);
+    if (idleFrames < 10) {
+      // Moving - excited open mouth
+      ctx.arc(sx, sy + 3, 5, 0, Math.PI);
+      ctx.fill();
+    } else if (idleFrames > idleThreshold + 100) {
+      // Very idle - slight frown/bored
+      ctx.arc(sx, sy + 6, 6, 1.2 * Math.PI, 1.8 * Math.PI);
+    } else {
+      // Normal smile
+      ctx.arc(sx, sy + 2, 6, 0.1 * Math.PI, 0.9 * Math.PI);
+    }
     ctx.stroke();
 
+    // Draw hat, name, level, score
+    this.drawPlayerHatAndLabels(ctx, sx, sy, radius, player);
+
+    ctx.globalAlpha = 1;
+  }
+
+  drawPlayerHatAndLabels(ctx, sx, sy, radius, player) {
     // Santa hat
     ctx.fillStyle = '#d32f2f';
     ctx.beginPath();
@@ -1654,8 +1825,6 @@ class ChristmasHuntGame {
     ctx.fillStyle = '#ffd93d';
     ctx.font = '10px sans-serif';
     ctx.fillText(player.score, sx, sy - radius - 20);
-
-    ctx.globalAlpha = 1;
   }
 
   createSnowflakes() {
@@ -2108,7 +2277,7 @@ class ChristmasHuntGame {
       for (let j = 0; j < numLights; j++) {
         const lx = x + ((j / (numLights - 1)) - 0.5) * layerWidth * 0.7;
         const colorIdx = (i + j) % lightColors.length;
-        const twinkle = Math.sin(this.animationTime * 5 + i * 2 + j * 3) * 0.4 + 0.6;
+        const twinkle = Math.sin(this.animationTime * 2 + i * 1.5 + j * 2) * 0.3 + 0.7;
 
         ctx.globalAlpha = twinkle * 0.6;
         ctx.fillStyle = lightColors[colorIdx];
