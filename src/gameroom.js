@@ -133,49 +133,115 @@ export class GameRoom {
     const seed = 54321;
     const random = this.seededRandom(seed);
 
-    // Ice patches
-    for (let i = 0; i < 20; i++) {
+    // SOLID OBSTACLES (block movement)
+
+    // Tree lines - horizontal barriers
+    const treeLinePositions = [
+      { startX: 400, startY: 400, count: 6, direction: 'horizontal' },
+      { startX: 1800, startY: 600, count: 5, direction: 'horizontal' },
+      { startX: 600, startY: 1400, count: 7, direction: 'horizontal' },
+      { startX: 2200, startY: 1200, count: 4, direction: 'horizontal' },
+      // Vertical tree lines
+      { startX: 1000, startY: 300, count: 5, direction: 'vertical' },
+      { startX: 2000, startY: 800, count: 4, direction: 'vertical' },
+      { startX: 500, startY: 1000, count: 3, direction: 'vertical' },
+    ];
+
+    let treeIdx = 0;
+    for (const line of treeLinePositions) {
+      for (let i = 0; i < line.count; i++) {
+        const spacing = 70;
+        const x = line.direction === 'horizontal' ? line.startX + i * spacing : line.startX;
+        const y = line.direction === 'vertical' ? line.startY + i * spacing : line.startY;
+
+        this.obstacles.set(`treeline_${treeIdx}`, {
+          id: `treeline_${treeIdx}`,
+          type: 'solidtree',
+          x: x,
+          y: y,
+          radius: 30,
+          solid: true
+        });
+        treeIdx++;
+      }
+    }
+
+    // Snowman barriers - clusters that block paths
+    const snowmanClusters = [
+      { x: 800, y: 800, count: 3 },
+      { x: 1500, y: 500, count: 4 },
+      { x: 2400, y: 400, count: 3 },
+      { x: 1200, y: 1600, count: 4 },
+      { x: 2600, y: 1500, count: 3 },
+      { x: 400, y: 1800, count: 2 },
+    ];
+
+    let snowmanIdx = 0;
+    for (const cluster of snowmanClusters) {
+      for (let i = 0; i < cluster.count; i++) {
+        const angle = (i / cluster.count) * Math.PI * 2;
+        const dist = 40 + i * 25;
+        this.obstacles.set(`snowman_${snowmanIdx}`, {
+          id: `snowman_${snowmanIdx}`,
+          type: 'solidsnowman',
+          x: cluster.x + Math.cos(angle) * dist,
+          y: cluster.y + Math.sin(angle) * dist,
+          radius: 25,
+          solid: true
+        });
+        snowmanIdx++;
+      }
+    }
+
+    // NON-SOLID OBSTACLES (effects only)
+
+    // Ice patches (slippery, not solid)
+    for (let i = 0; i < 15; i++) {
       this.obstacles.set(`ice_${i}`, {
         id: `ice_${i}`,
         type: 'ice',
-        x: random() * WORLD_WIDTH,
-        y: random() * WORLD_HEIGHT,
-        radius: 40 + random() * 60
+        x: 200 + random() * (WORLD_WIDTH - 400),
+        y: 200 + random() * (WORLD_HEIGHT - 400),
+        radius: 40 + random() * 60,
+        solid: false
       });
     }
 
-    // Snowdrifts
-    for (let i = 0; i < 25; i++) {
+    // Snowdrifts (slow down, not solid)
+    for (let i = 0; i < 20; i++) {
       this.obstacles.set(`snow_${i}`, {
         id: `snow_${i}`,
         type: 'snowdrift',
-        x: random() * WORLD_WIDTH,
-        y: random() * WORLD_HEIGHT,
-        radius: 30 + random() * 40
+        x: 200 + random() * (WORLD_WIDTH - 400),
+        y: 200 + random() * (WORLD_HEIGHT - 400),
+        radius: 30 + random() * 40,
+        solid: false
       });
     }
 
-    // Snowball turrets
-    for (let i = 0; i < 8; i++) {
+    // Snowball turrets (solid)
+    for (let i = 0; i < 6; i++) {
       this.obstacles.set(`turret_${i}`, {
         id: `turret_${i}`,
         type: 'turret',
-        x: random() * WORLD_WIDTH,
-        y: random() * WORLD_HEIGHT,
+        x: 300 + random() * (WORLD_WIDTH - 600),
+        y: 300 + random() * (WORLD_HEIGHT - 600),
         radius: 25,
         lastShot: 0,
-        shootInterval: 2000 + random() * 2000
+        shootInterval: 2500 + random() * 2000,
+        solid: true
       });
     }
 
-    // Frozen lakes
-    for (let i = 0; i < 5; i++) {
+    // Frozen lakes (can fall through)
+    for (let i = 0; i < 4; i++) {
       this.obstacles.set(`lake_${i}`, {
         id: `lake_${i}`,
         type: 'frozenlake',
-        x: random() * WORLD_WIDTH,
-        y: random() * WORLD_HEIGHT,
-        radius: 80 + random() * 60
+        x: 300 + random() * (WORLD_WIDTH - 600),
+        y: 300 + random() * (WORLD_HEIGHT - 600),
+        radius: 80 + random() * 60,
+        solid: false
       });
     }
   }
@@ -370,11 +436,23 @@ export class GameRoom {
     let newX = Math.max(0, Math.min(WORLD_WIDTH, player.x + dx));
     let newY = Math.max(0, Math.min(WORLD_HEIGHT, player.y + dy));
 
+    // Check solid obstacle collisions BEFORE moving
+    const collision = this.checkSolidCollision(newX, newY, 18); // player radius ~18
+    if (collision) {
+      // Push player out of solid obstacle
+      const pushDist = collision.radius + 18 + 2; // obstacle radius + player radius + buffer
+      const angle = Math.atan2(newY - collision.y, newX - collision.x);
+      newX = collision.x + Math.cos(angle) * pushDist;
+      newY = collision.y + Math.sin(angle) * pushDist;
+      newX = Math.max(0, Math.min(WORLD_WIDTH, newX));
+      newY = Math.max(0, Math.min(WORLD_HEIGHT, newY));
+    }
+
     player.x = newX;
     player.y = newY;
     player.lastUpdate = Date.now();
 
-    // Check obstacle collisions
+    // Check non-solid obstacle effects (ice, snowdrift, etc.)
     this.checkObstacleCollisions(player);
 
     // Check magnet powerup - attract gifts
@@ -391,6 +469,21 @@ export class GameRoom {
       inSnowdrift: player.inSnowdrift,
       frozen: player.frozen
     });
+  }
+
+  checkSolidCollision(x, y, playerRadius) {
+    for (const obs of this.obstacles.values()) {
+      if (!obs.solid) continue;
+
+      const dx = x - obs.x;
+      const dy = y - obs.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist < obs.radius + playerRadius) {
+        return obs; // Return the obstacle we're colliding with
+      }
+    }
+    return null; // No collision
   }
 
   checkObstacleCollisions(player) {
@@ -904,8 +997,26 @@ export class GameRoom {
     const dist = Math.sqrt(dx*dx + dy*dy);
 
     if (dist > 0) {
-      grinch.x += (dx / dist) * grinch.speed;
-      grinch.y += (dy / dist) * grinch.speed;
+      let newX = grinch.x + (dx / dist) * grinch.speed;
+      let newY = grinch.y + (dy / dist) * grinch.speed;
+
+      // Check collision with solid obstacles
+      let blocked = false;
+      for (const obs of this.obstacles.values()) {
+        if (!obs.solid) continue;
+        const obsDist = Math.sqrt((obs.x - newX)**2 + (obs.y - newY)**2);
+        if (obsDist < obs.radius + 25) { // grinch radius ~25
+          blocked = true;
+          // Try to move around obstacle
+          const pushAngle = Math.atan2(newY - obs.y, newX - obs.x);
+          newX = obs.x + Math.cos(pushAngle) * (obs.radius + 30);
+          newY = obs.y + Math.sin(pushAngle) * (obs.radius + 30);
+          break;
+        }
+      }
+
+      grinch.x = Math.max(0, Math.min(WORLD_WIDTH, newX));
+      grinch.y = Math.max(0, Math.min(WORLD_HEIGHT, newY));
     }
 
     // Check if caught a player
@@ -959,13 +1070,28 @@ export class GameRoom {
           continue;
         }
 
+        // Check collision with solid obstacles
+        let hitObstacle = false;
+        for (const obs of this.obstacles.values()) {
+          if (!obs.solid) continue;
+          const dist = Math.sqrt((obs.x - sb.x)**2 + (obs.y - sb.y)**2);
+          if (dist < obs.radius + 8) { // 8 = snowball radius
+            hitObstacle = true;
+            break;
+          }
+        }
+        if (hitObstacle) {
+          toRemove.push(id);
+          continue;
+        }
+
         // Check player collisions
         for (const player of this.players.values()) {
           if (player.id === sb.ownerId) continue;
           if (sb.ownerTeam && sb.ownerTeam === player.team) continue;
 
           const dist = Math.sqrt((player.x - sb.x)**2 + (player.y - sb.y)**2);
-          if (dist < 25) {
+          if (dist < 30) { // Increased hit radius for better feel
             // Hit!
             if (!player.powerups.shield || Date.now() >= player.powerups.shield) {
               player.frozen = true;
@@ -1043,7 +1169,7 @@ export class GameRoom {
           obs.lastShot = now;
         }
       }
-    }, 50);
+    }, 30); // Faster update for better collision detection
   }
 
   turretShoot(turret) {

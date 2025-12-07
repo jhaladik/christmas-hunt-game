@@ -14,6 +14,7 @@ class ChristmasHuntGame {
     this.teams = new Map();
     this.worldSize = { width: 3000, height: 2000 };
     this.camera = { x: 0, y: 0 };
+    this.cameraZoom = 1.0; // Normal zoom (was 0.7 but caused edge issues)
     this.keys = {};
     this.levels = [];
     this.powerupTypes = [];
@@ -497,12 +498,9 @@ class ChristmasHuntGame {
       if (name) this.ws.send(JSON.stringify({ type: 'createTeam', name }));
     });
 
-    // Mobile throw button
+    // Mobile throw button - use facing direction
     document.getElementById('throw-btn').addEventListener('click', () => {
       if (this.player) {
-        // Throw in direction of movement or forward
-        this.mouseX = this.player.x + (this.joystick.dx || 0) * 100;
-        this.mouseY = this.player.y + (this.joystick.dy || -1) * 100;
         this.throwSnowball();
       }
     });
@@ -689,26 +687,10 @@ class ChristmasHuntGame {
   throwSnowball() {
     if (!this.player || this.player.snowballs <= 0) return;
 
-    // Calculate target position - use facing direction to shoot forward
+    // Always shoot in the direction the player is facing/moving
     const throwDistance = 300;
-    let targetX, targetY;
-
-    // If mouse is significantly away from player, use mouse position
-    const playerScreenX = this.player.x - this.camera.x;
-    const playerScreenY = this.player.y - this.camera.y;
-    const mouseDx = (this.mouseX - this.camera.x) - playerScreenX;
-    const mouseDy = (this.mouseY - this.camera.y) - playerScreenY;
-    const mouseDistFromPlayer = Math.sqrt(mouseDx * mouseDx + mouseDy * mouseDy);
-
-    if (mouseDistFromPlayer > 50) {
-      // Mouse is far enough, shoot towards mouse
-      targetX = this.mouseX;
-      targetY = this.mouseY;
-    } else {
-      // Mouse is close to player, shoot in facing direction
-      targetX = this.player.x + this.facingDirX * throwDistance;
-      targetY = this.player.y + this.facingDirY * throwDistance;
-    }
+    const targetX = this.player.x + this.facingDirX * throwDistance;
+    const targetY = this.player.y + this.facingDirY * throwDistance;
 
     this.ws.send(JSON.stringify({
       type: 'throwSnowball',
@@ -733,17 +715,18 @@ class ChristmasHuntGame {
       this.screenShake.y = (Math.random() - 0.5) * this.screenShake.intensity;
       this.screenShake.intensity *= 0.9;
       if (this.screenShake.intensity < 0.1) this.screenShake.intensity = 0;
-      ctx.save();
-      ctx.translate(this.screenShake.x, this.screenShake.y);
     }
 
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    // Background based on time
+    // Background based on time (drawn without zoom)
     this.drawBackground();
 
-    // Draw parallax snowy hills
-    this.drawSnowyHills();
+    // Apply screen shake transform
+    ctx.save();
+    if (this.screenShake.intensity > 0) {
+      ctx.translate(this.screenShake.x, this.screenShake.y);
+    }
 
     // Grid
     this.drawGrid();
@@ -796,61 +779,11 @@ class ChristmasHuntGame {
       this.drawStars();
     }
 
-    // Restore from screen shake
-    if (this.screenShake.intensity > 0 || this.screenShake.x !== 0 || this.screenShake.y !== 0) {
-      ctx.restore();
-    }
+    // Restore from zoom/shake transform
+    ctx.restore();
 
-    // Minimap
+    // Minimap (drawn without zoom)
     this.drawMinimap();
-  }
-
-  drawSnowyHills() {
-    const ctx = this.ctx;
-    const parallaxFactor1 = 0.1;
-    const parallaxFactor2 = 0.2;
-    const parallaxFactor3 = 0.3;
-
-    // Far hills (slowest parallax)
-    const hillColors = {
-      day: ['#b8d4e8', '#a5c4d9', '#95b7d0'],
-      dawn: ['#d4a6b8', '#c99bae', '#be90a4'],
-      dusk: ['#5c5680', '#524d75', '#48446a'],
-      night: ['#1e2a4a', '#182040', '#121836']
-    };
-    const colors = hillColors[this.timeOfDay] || hillColors.night;
-
-    // Hill layer 1 (farthest, slowest)
-    this.drawHillLayer(ctx, colors[0], parallaxFactor1, 0.7, 80, 0);
-
-    // Hill layer 2 (middle)
-    this.drawHillLayer(ctx, colors[1], parallaxFactor2, 0.75, 60, 100);
-
-    // Hill layer 3 (closest, fastest)
-    this.drawHillLayer(ctx, colors[2], parallaxFactor3, 0.8, 50, 200);
-  }
-
-  drawHillLayer(ctx, color, parallaxFactor, baseY, amplitude, offset) {
-    const scrollX = this.camera.x * parallaxFactor;
-    const width = this.canvas.width;
-    const height = this.canvas.height;
-
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.moveTo(0, height);
-
-    for (let x = 0; x <= width + 50; x += 50) {
-      const worldX = x + scrollX + offset;
-      const hillY = Math.sin(worldX * 0.003) * amplitude +
-                   Math.sin(worldX * 0.007 + 1) * (amplitude * 0.5) +
-                   Math.sin(worldX * 0.002 + 2) * (amplitude * 0.3);
-      const y = height * baseY + hillY;
-      ctx.lineTo(x, y);
-    }
-
-    ctx.lineTo(width, height);
-    ctx.closePath();
-    ctx.fill();
   }
 
   drawParticles() {
@@ -1097,7 +1030,135 @@ class ChristmasHuntGame {
         ctx.textAlign = 'center';
         ctx.fillText('THIN ICE', sx, sy);
         break;
+
+      case 'solidtree':
+        // Draw a solid tree barrier (simpler, darker tree to indicate solid)
+        this.drawSolidTree(sx, sy, obs.radius);
+        break;
+
+      case 'solidsnowman':
+        // Draw a solid snowman barrier
+        this.drawSolidSnowman(sx, sy, obs.radius);
+        break;
     }
+  }
+
+  drawSolidTree(x, y, radius) {
+    const ctx = this.ctx;
+    const scale = radius / 30;
+
+    // Snow base
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.beginPath();
+    ctx.ellipse(x, y + 5 * scale, 18 * scale, 6 * scale, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Trunk
+    ctx.fillStyle = '#4a3728';
+    ctx.fillRect(x - 4 * scale, y - 5 * scale, 8 * scale, 15 * scale);
+
+    // Tree layers (darker green to show it's solid)
+    const layers = [
+      { w: 32 * scale, h: 18 * scale, c: '#1a3d1c' },
+      { w: 26 * scale, h: 15 * scale, c: '#225525' },
+      { w: 20 * scale, h: 12 * scale, c: '#2a6b2e' }
+    ];
+
+    let oy = 5 * scale;
+    layers.forEach(l => {
+      ctx.fillStyle = l.c;
+      ctx.beginPath();
+      ctx.moveTo(x, y - oy - l.h);
+      ctx.lineTo(x - l.w / 2, y - oy);
+      ctx.lineTo(x + l.w / 2, y - oy);
+      ctx.closePath();
+      ctx.fill();
+
+      // Snow caps
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.beginPath();
+      ctx.moveTo(x, y - oy - l.h);
+      ctx.lineTo(x - l.w * 0.3, y - oy - l.h * 0.3);
+      ctx.lineTo(x + l.w * 0.3, y - oy - l.h * 0.3);
+      ctx.closePath();
+      ctx.fill();
+
+      oy += l.h * 0.5;
+    });
+
+    // Collision indicator circle (faint)
+    ctx.strokeStyle = 'rgba(139, 69, 19, 0.3)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  drawSolidSnowman(x, y, radius) {
+    const ctx = this.ctx;
+    const scale = radius / 25;
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.beginPath();
+    ctx.ellipse(x, y + 15 * scale, 18 * scale, 6 * scale, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Bottom ball
+    ctx.fillStyle = '#f0f0f0';
+    ctx.beginPath();
+    ctx.arc(x, y, 18 * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Middle ball
+    ctx.beginPath();
+    ctx.arc(x, y - 22 * scale, 13 * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Head
+    ctx.beginPath();
+    ctx.arc(x, y - 40 * scale, 10 * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#333';
+    ctx.beginPath();
+    ctx.arc(x - 4 * scale, y - 42 * scale, 2 * scale, 0, Math.PI * 2);
+    ctx.arc(x + 4 * scale, y - 42 * scale, 2 * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Carrot nose
+    ctx.fillStyle = '#ff6600';
+    ctx.beginPath();
+    ctx.moveTo(x, y - 38 * scale);
+    ctx.lineTo(x + 10 * scale, y - 36 * scale);
+    ctx.lineTo(x, y - 34 * scale);
+    ctx.closePath();
+    ctx.fill();
+
+    // Buttons
+    ctx.fillStyle = '#333';
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.arc(x, y - 15 * scale + i * 8 * scale, 2 * scale, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Top hat
+    ctx.fillStyle = '#222';
+    ctx.fillRect(x - 8 * scale, y - 54 * scale, 16 * scale, 3 * scale);
+    ctx.fillRect(x - 6 * scale, y - 66 * scale, 12 * scale, 12 * scale);
+
+    // Collision indicator (faint)
+    ctx.strokeStyle = 'rgba(100,100,100,0.3)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   drawDecorations() {
